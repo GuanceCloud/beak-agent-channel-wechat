@@ -1,0 +1,5 @@
+.beak-agent-weixin/
+.cache/
+bin/
+/beak-agent-weixin
+.DS_Store
