@@ -19,9 +19,10 @@ import (
 const (
 	DefaultBaseURL        = "https://ilinkai.weixin.qq.com"
 	DefaultClientVersion  = "0.1.0"
-	DefaultBotAgent       = "BeakAgentWeixin/0.1.0"
+	DefaultBotAgent       = "Beak Agent"
+	DefaultAppID          = "bot"
 	defaultClientVersion  = DefaultClientVersion
-	defaultAppID          = "bot"
+	defaultAppID          = DefaultAppID
 	defaultBotAgent       = DefaultBotAgent
 	defaultAPITimeout     = 15 * time.Second
 	defaultLongPoll       = 35 * time.Second

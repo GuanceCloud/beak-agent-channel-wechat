@@ -23,6 +23,9 @@ func TestGetUpdatesBuildsIlinkRequest(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
 			t.Fatalf("Authorization=%q", got)
 		}
+		if got := r.Header.Get("iLink-App-Id"); got != DefaultAppID {
+			t.Fatalf("iLink-App-Id=%q", got)
+		}
 		if got := r.Header.Get("X-WECHAT-UIN"); got == "" {
 			t.Fatal("missing X-WECHAT-UIN")
 		}
@@ -33,7 +36,7 @@ func TestGetUpdatesBuildsIlinkRequest(t *testing.T) {
 		if body.GetUpdatesBuf != "buf-1" {
 			t.Fatalf("get_updates_buf=%q", body.GetUpdatesBuf)
 		}
-		if body.BaseInfo.ChannelVersion == "" || body.BaseInfo.BotAgent == "" {
+		if body.BaseInfo.ChannelVersion == "" || body.BaseInfo.BotAgent != DefaultBotAgent {
 			t.Fatalf("missing base_info: %+v", body.BaseInfo)
 		}
 		_ = json.NewEncoder(w).Encode(GetUpdatesResponse{Ret: 0, GetUpdatesBuf: "buf-2"})
@@ -96,6 +99,9 @@ func TestQRCodeLoginEndpoints(t *testing.T) {
 			}
 			if r.Header.Get("iLink-App-ClientVersion") == "" {
 				t.Fatal("missing iLink-App-ClientVersion")
+			}
+			if got := r.Header.Get("iLink-App-Id"); got != DefaultAppID {
+				t.Fatalf("iLink-App-Id=%q", got)
 			}
 			_ = json.NewEncoder(w).Encode(QRCodeStatusResponse{Status: "confirmed", BotToken: "token-1", ILinkBotID: "account-1", BaseURL: server.URL})
 		default:

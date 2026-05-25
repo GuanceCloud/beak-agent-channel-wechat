@@ -104,6 +104,220 @@ func TestWeixinConnectorQRCodeLoginThroughSDK(t *testing.T) {
 	}
 }
 
+func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
+	const fixedReply = "Beak Agent 已收到你的消息"
+	sentCh := make(chan scenarioSentMessage, 1)
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
+	var updatesServed int
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ilink/bot/get_bot_qrcode":
+			if got := r.URL.Query().Get("bot_type"); got != "3" {
+				t.Fatalf("bot_type=%q", got)
+			}
+			if got := r.Header.Get("iLink-App-Id"); got != "bot" {
+				t.Fatalf("iLink-App-Id=%q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"qrcode":             "qr-scenario-1",
+				"qrcode_img_content": "https://example.test/qr-scenario-1",
+			})
+		case "/ilink/bot/get_qrcode_status":
+			if got := r.URL.Query().Get("qrcode"); got != "qr-scenario-1" {
+				t.Fatalf("qrcode=%q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":        "confirmed",
+				"bot_token":     "token-scenario-1",
+				"ilink_bot_id":  "account-scenario-1",
+				"ilink_user_id": "ilink-user-scenario-1",
+				"baseurl":       server.URL,
+			})
+		case "/ilink/bot/msg/notifystart":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+		case "/ilink/bot/msg/notifystop":
+			stopOnce.Do(func() { close(stopCh) })
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+		case "/ilink/bot/getupdates":
+			updatesServed++
+			if updatesServed == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ret":             0,
+					"get_updates_buf": "buf-scenario-1",
+					"msgs": []map[string]any{
+						{
+							"message_id":    1001,
+							"from_user_id":  "user-scenario-1",
+							"message_type":  1,
+							"message_state": 2,
+							"context_token": "ctx-scenario-1",
+							"item_list": []map[string]any{
+								{
+									"type":      1,
+									"text_item": map[string]any{"text": "你好 Beak"},
+								},
+							},
+						},
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "get_updates_buf": "buf-scenario-1"})
+		case "/ilink/bot/sendmessage":
+			if got := r.Header.Get("Authorization"); got != "Bearer token-scenario-1" {
+				t.Fatalf("Authorization=%q", got)
+			}
+			var body struct {
+				Message struct {
+					ToUserID     string `json:"to_user_id"`
+					ContextToken string `json:"context_token"`
+					ItemList     []struct {
+						TextItem struct {
+							Text string `json:"text"`
+						} `json:"text_item"`
+					} `json:"item_list"`
+				} `json:"msg"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			text := ""
+			if len(body.Message.ItemList) > 0 {
+				text = body.Message.ItemList[0].TextItem.Text
+			}
+			sentCh <- scenarioSentMessage{
+				to:           body.Message.ToUserID,
+				text:         text,
+				contextToken: body.Message.ContextToken,
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	targetURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient := &http.Client{Transport: rewriteTransport{target: targetURL, base: http.DefaultTransport}}
+	connector := NewConnector()
+	gateway := newScenarioSDKGateway(fixedReply)
+	accountStore := newFakeSDKAccountStore()
+	loginRuntime := sdk.Runtime{HTTPClient: httpClient}
+
+	challenge, err := connector.StartLogin(context.Background(), sdk.LoginStartRequest{
+		WorkspaceUUID: "workspace-scenario-1",
+		ChannelUUID:   "channel-scenario-1",
+		Runtime:       loginRuntime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if challenge.Type != sdk.LoginModeQRCode || challenge.Code != "qr-scenario-1" {
+		t.Fatalf("challenge=%+v", challenge)
+	}
+
+	status, err := connector.PollLogin(context.Background(), sdk.LoginPollRequest{
+		WorkspaceUUID:  "workspace-scenario-1",
+		ChannelUUID:    "channel-scenario-1",
+		ChallengeState: challenge.State,
+		Runtime:        loginRuntime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Confirmed || status.Account.UUID != "account-scenario-1" {
+		t.Fatalf("status=%+v", status)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- connector.Start(ctx, sdk.Runtime{
+			WorkspaceUUID: "workspace-scenario-1",
+			Channel: sdk.Channel{
+				UUID:          "channel-scenario-1",
+				WorkspaceUUID: "workspace-scenario-1",
+				Platform:      "weixin",
+			},
+			Account:         status.Account,
+			Gateway:         gateway,
+			AccountStore:    accountStore,
+			HTTPClient:      httpClient,
+			PollInterval:    time.Millisecond,
+			StreamReconnect: time.Millisecond,
+		})
+	}()
+
+	var sent scenarioSentMessage
+	select {
+	case sent = <-sentCh:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for fixed bot reply to be sent to weixin")
+	}
+	select {
+	case err := <-gateway.streamDone:
+		if err != nil {
+			cancel()
+			t.Fatalf("stream error=%v", err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("timed out waiting for fixed bot stream to finish")
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Start error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for connector to stop")
+	}
+	select {
+	case <-stopCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for weixin notifystop")
+	}
+
+	if sent.to != "user-scenario-1" || sent.text != fixedReply || sent.contextToken != "ctx-scenario-1" {
+		t.Fatalf("sent=%+v", sent)
+	}
+	gateway.mu.Lock()
+	createdMessages := append([]sdk.CreateMessageRequest(nil), gateway.messages...)
+	chatSessions := append([]sdk.EnsureChatSessionRequest(nil), gateway.chatSessions...)
+	gateway.mu.Unlock()
+	if len(createdMessages) != 1 {
+		t.Fatalf("created messages=%+v", createdMessages)
+	}
+	created := createdMessages[0]
+	if created.SessionUUID != "session-scenario-1" || created.Content != "你好 Beak" || created.SenderID != "im:weixin:direct:user-scenario-1:user:user-scenario-1" {
+		t.Fatalf("created message=%+v", created)
+	}
+	if len(chatSessions) != 1 || chatSessions[0].AccountUUID != "account-scenario-1" || chatSessions[0].ChatType != sdk.ChatTypeDirect || chatSessions[0].ChatID != "user-scenario-1" {
+		t.Fatalf("chat sessions=%+v", chatSessions)
+	}
+
+	state := accountStore.state("account-scenario-1")
+	if state["get_updates_buf"] != "buf-scenario-1" {
+		t.Fatalf("state=%+v", state)
+	}
+	contextTokens, ok := state["context_tokens"].(map[string]string)
+	if !ok || contextTokens["user-scenario-1"] != "ctx-scenario-1" {
+		t.Fatalf("context tokens=%+v", state["context_tokens"])
+	}
+	sentBeakMessages, ok := state["sent_beak_messages"].(map[string]string)
+	if !ok || sentBeakMessages["agent-message-scenario-1"] == "" {
+		t.Fatalf("sent beak messages=%+v", state["sent_beak_messages"])
+	}
+}
+
 func TestWeixinConnectorStartProcessesInboundWithRuntimeAccount(t *testing.T) {
 	var updatesServed int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -348,6 +562,71 @@ func (f *fakeSDKGateway) AgentParticipantID() string {
 }
 
 func (f *fakeSDKGateway) BridgeParticipantID(string) string {
+	return "bridge:weixin"
+}
+
+type scenarioSDKGateway struct {
+	mu           sync.Mutex
+	fixedReply   string
+	streamOnce   sync.Once
+	streamDone   chan error
+	chatSessions []sdk.EnsureChatSessionRequest
+	messages     []sdk.CreateMessageRequest
+}
+
+type scenarioSentMessage struct {
+	to           string
+	text         string
+	contextToken string
+}
+
+func newScenarioSDKGateway(fixedReply string) *scenarioSDKGateway {
+	return &scenarioSDKGateway{fixedReply: fixedReply, streamDone: make(chan error, 1)}
+}
+
+func (g *scenarioSDKGateway) EnsureChannel(context.Context, sdk.EnsureChannelRequest) (string, error) {
+	return "channel-scenario-1", nil
+}
+
+func (g *scenarioSDKGateway) EnsureChannelLinkSession(context.Context, sdk.EnsureChannelLinkSessionRequest) (string, error) {
+	return "channel-link-session-scenario-1", nil
+}
+
+func (g *scenarioSDKGateway) EnsureChatSession(_ context.Context, req sdk.EnsureChatSessionRequest) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.chatSessions = append(g.chatSessions, req)
+	return "session-scenario-1", nil
+}
+
+func (g *scenarioSDKGateway) CreateMessage(_ context.Context, req sdk.CreateMessageRequest) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.messages = append(g.messages, req)
+	return "message-scenario-1", nil
+}
+
+func (g *scenarioSDKGateway) StreamSession(_ context.Context, req sdk.StreamSessionRequest, handle func(sdk.StreamEvent) error) error {
+	var err error
+	g.streamOnce.Do(func() {
+		err = handle(sdk.StreamEvent{
+			EventUUID:   "event-scenario-1",
+			SessionUUID: req.SessionUUID,
+			EventType:   "message",
+			MessageUUID: "agent-message-scenario-1",
+			SenderID:    g.AgentParticipantID(),
+			Content:     g.fixedReply,
+		})
+		g.streamDone <- err
+	})
+	return err
+}
+
+func (g *scenarioSDKGateway) AgentParticipantID() string {
+	return "agent:agent-1"
+}
+
+func (g *scenarioSDKGateway) BridgeParticipantID(string) string {
 	return "bridge:weixin"
 }
 

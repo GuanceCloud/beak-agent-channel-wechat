@@ -95,7 +95,7 @@ func (w *WeixinOptions) ApplyDefaults() {
 		w.BotAgent = weixin.DefaultBotAgent
 	}
 	if w.AppID == "" {
-		w.AppID = "bot"
+		w.AppID = weixin.DefaultAppID
 	}
 	if w.AppClientVersion == "" {
 		w.AppClientVersion = EncodeAppClientVersion(w.ChannelVersion)

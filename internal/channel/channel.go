@@ -254,10 +254,17 @@ func (c *Client) PollLogin(ctx context.Context, qrcode string) (*LoginStatus, er
 	}
 	wxCfg := c.weixinRuntimeConfig()
 	wxClient := c.newWeixinClient(wxCfg, "")
-	statusCtx, statusCancel := context.WithTimeout(ctx, wxCfg.RequestTimeout)
+	statusTimeout := wxCfg.LongPollTimeout + 2*time.Second
+	if statusTimeout <= 2*time.Second {
+		statusTimeout = wxCfg.RequestTimeout
+	}
+	statusCtx, statusCancel := context.WithTimeout(ctx, statusTimeout)
 	status, err := wxClient.GetQRCodeStatus(statusCtx, qrcode)
 	statusCancel()
 	if err != nil {
+		if statusCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+			return &LoginStatus{Status: "wait"}, nil
+		}
 		return nil, err
 	}
 	out := &LoginStatus{Status: status.Status}
