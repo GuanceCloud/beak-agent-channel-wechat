@@ -18,6 +18,8 @@ import (
 type WeixinClient interface {
 	GetUpdates(ctx context.Context, getUpdatesBuf string, timeout time.Duration) (*weixin.GetUpdatesResponse, error)
 	SendText(ctx context.Context, toUserID, text, contextToken string) error
+	GetTypingTicket(ctx context.Context, ilinkUserID, contextToken string) (string, error)
+	SendTyping(ctx context.Context, ilinkUserID, typingTicket string, status int) error
 	NotifyStart(ctx context.Context) error
 	NotifyStop(ctx context.Context) error
 }
@@ -97,6 +99,9 @@ func (b *Bridge) runAccount(ctx context.Context, accountCfg AccountConfig) error
 	if err != nil {
 		return err
 	}
+	if account.LoginRequired() {
+		return fmt.Errorf("weixin account %s requires login: %s", account.AccountID, account.LastError)
+	}
 	if account.BotToken == "" {
 		return fmt.Errorf("weixin account %s is not logged in; call channel.Login first", account.AccountID)
 	}
@@ -171,6 +176,7 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 		resp, err := r.wx.GetUpdates(ctx, buf, longPollTimeout+2*time.Second)
 		if err != nil {
 			if errors.Is(err, weixin.ErrSessionExpired) {
+				_ = r.markSessionExpired("getupdates session expired")
 				return fmt.Errorf("weixin account %s session expired; run login again: %w", r.account.AccountID, err)
 			}
 			r.logger.Printf("getUpdates account=%s error=%v", r.account.AccountID, err)
@@ -275,6 +281,13 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 	r.mu.Unlock()
 	if err != nil {
 		return "", false, err
+	}
+	if err := r.sendTyping(ctx, chatKey, weixin.TypingStatusStart); err != nil {
+		if errors.Is(err, weixin.ErrSessionExpired) {
+			_ = r.markSessionExpired("typing session expired")
+			return "", false, err
+		}
+		r.logger.Printf("send typing start account=%s peer=%s error=%v", r.account.AccountID, chatKey, err)
 	}
 	return sessionUUID, true, nil
 }
@@ -492,8 +505,19 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 		r.mu.Unlock()
 		return err
 	}
-	if err := r.wx.SendText(ctx, weixin.ChatIdentityFromStateKey(peerID).ReplyToUserID, content, contextToken); err != nil {
+	replyToUserID := weixin.ChatIdentityFromStateKey(peerID).ReplyToUserID
+	if err := r.wx.SendText(ctx, replyToUserID, content, contextToken); err != nil {
+		if errors.Is(err, weixin.ErrSessionExpired) {
+			_ = r.markSessionExpired("sendmessage session expired")
+		}
 		return err
+	}
+	if err := r.sendTyping(ctx, peerID, weixin.TypingStatusStop); err != nil {
+		if errors.Is(err, weixin.ErrSessionExpired) {
+			_ = r.markSessionExpired("typing session expired")
+			return err
+		}
+		r.logger.Printf("send typing stop account=%s peer=%s error=%v", r.account.AccountID, peerID, err)
 	}
 
 	r.mu.Lock()
@@ -514,6 +538,65 @@ func (r *AccountRunner) advanceCursor(sessionUUID, eventUUID string) error {
 	}
 	r.mu.Lock()
 	r.account.StreamCursors[sessionUUID] = eventUUID
+	err := r.store.SaveAccount(r.account)
+	r.mu.Unlock()
+	return err
+}
+
+func (r *AccountRunner) sendTyping(ctx context.Context, peerID string, status int) error {
+	if r.options.Weixin.DisableTyping {
+		return nil
+	}
+	chat := weixin.ChatIdentityFromStateKey(peerID)
+	if chat.ReplyToUserID == "" {
+		return nil
+	}
+
+	r.mu.Lock()
+	contextToken := r.account.ContextTokens[peerID]
+	typingTicket := r.account.TypingTickets[peerID]
+	r.mu.Unlock()
+	if contextToken == "" {
+		return nil
+	}
+
+	if typingTicket == "" {
+		ticket, err := r.wx.GetTypingTicket(ctx, chat.ReplyToUserID, contextToken)
+		if err != nil {
+			return err
+		}
+		typingTicket = ticket
+		r.mu.Lock()
+		r.account.TypingTickets[peerID] = typingTicket
+		err = r.store.SaveAccount(r.account)
+		r.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+
+	err := r.wx.SendTyping(ctx, chat.ReplyToUserID, typingTicket, status)
+	if err == nil || errors.Is(err, weixin.ErrSessionExpired) {
+		return err
+	}
+
+	ticket, refreshErr := r.wx.GetTypingTicket(ctx, chat.ReplyToUserID, contextToken)
+	if refreshErr != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.account.TypingTickets[peerID] = ticket
+	saveErr := r.store.SaveAccount(r.account)
+	r.mu.Unlock()
+	if saveErr != nil {
+		return saveErr
+	}
+	return r.wx.SendTyping(ctx, chat.ReplyToUserID, ticket, status)
+}
+
+func (r *AccountRunner) markSessionExpired(reason string) error {
+	r.mu.Lock()
+	r.account.MarkLoginRequired(reason)
 	err := r.store.SaveAccount(r.account)
 	r.mu.Unlock()
 	return err

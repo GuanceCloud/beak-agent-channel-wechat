@@ -4,7 +4,7 @@
 
 这是一个 Go SDK 包，用于把 Beak Channel Gateway 接入微信 bot account，并通过 Tencent iLink Weixin APIs 完成扫码登录、消息接收和消息发送。
 
-本仓库提供的是可被 Beak host `import` 的库代码，不是命令行工具。SDK 不读取用户编写的运行时配置文件，不维护本地状态目录，不拥有数据库持久化，也不要求用户登录服务器修改文件。Beak host 负责客户端 UI、credential 持久化、account state 持久化、session 创建、message 写入、agent stream 订阅和 connector runtime 打包。SDK 只负责微信 connector 逻辑：二维码登录、轮询收消息、文本发送、消息去重、stream cursor 处理，以及把微信消息标准化为 Beak Gateway 能理解的消息。
+本仓库提供的是可被 Beak host `import` 的库代码，不是命令行工具。SDK 不读取用户编写的运行时配置文件，不维护本地状态目录，不拥有数据库持久化，也不要求用户登录服务器修改文件。Beak host 负责客户端 UI、credential 持久化、account state 持久化、session 创建、message 写入、agent stream 订阅和 connector runtime 打包。SDK 只负责微信 connector 逻辑：二维码登录、轮询收消息、文本发送、typing 状态、消息去重、stream cursor 处理，以及把微信消息标准化为 Beak Gateway 能理解的消息。
 
 ## 范围
 
@@ -15,6 +15,7 @@ v1 支持：
 - 由 Beak host 保存 credential 和 connector state。
 - 微信文本消息入站到 Beak session。
 - Beak agent 文本输出回发到微信。
+- 通过 `getconfig` 和 `sendtyping` 发送微信 typing 状态。
 - 单聊和显式群聊标准化。
 - 一个已连接 bot account 中的一个群聊对应一个 Beak session。
 - 一个已连接 bot account 中的一个单聊对应一个 Beak session。
@@ -23,7 +24,7 @@ v1 支持：
 
 v1 不支持：
 
-- media、voice、typing status。
+- media、voice。
 - CDN/AES 媒体上传下载。
 - 修改 Beak host 代码。
 - 把微信 connector 做成 CLI。
@@ -303,9 +304,10 @@ channel-link session 只表示账号连接关系，不创建 Beak task。
 3. Connector 跳过非文本、不完整或重复 update。
 4. Connector 从 `group_id` 或 `from_user_id` 标准化 chat identity。
 5. Connector 缓存最新 chat `context_token`。
-6. Gateway 确保存在 `weixin:<account_uuid>:<chat_type>:<chat_id>` 对应的 Beak session。
-7. Gateway 写入 Beak message，sender 为 `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`。
-8. Gateway 或 bridge 消费同一个 session 的 Beak agent stream。
+6. Connector 在 Beak agent 处理期间按需发送微信 typing 状态。
+7. Gateway 确保存在 `weixin:<account_uuid>:<chat_type>:<chat_id>` 对应的 Beak session。
+8. Gateway 写入 Beak message，sender 为 `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`。
+9. Gateway 或 bridge 消费同一个 session 的 Beak agent stream。
 
 Beak agent 文本出站：
 
@@ -315,7 +317,9 @@ Beak agent 文本出站：
 4. 只有来自 `AgentParticipantID()` 的 message event 才可以投递。
 5. Connector 按 Beak message/event id 去重。
 6. Connector 调用 `ilink/bot/sendmessage`，并带上 chat id 和缓存的 `context_token`。
-7. Connector 在成功发送或确认跳过后保存 `last_event_uuid`。
+7. Connector 发送前会把超长文本切成兼容微信的多条消息。
+8. 如果启用了 typing，Connector 在成功投递后发送 typing stop。
+9. Connector 在成功发送或确认跳过后保存 `last_event_uuid`。
 
 Bridge 会带着最后保存的 event cursor 进行 backoff reconnect。这样即使当前 stream 只在连接时返回已有 events 加 heartbeat，connector 也能继续工作。
 
@@ -326,6 +330,8 @@ Connector 内部使用 Tencent iLink Weixin endpoints：
 - `ilink/bot/get_bot_qrcode`
 - `ilink/bot/get_qrcode_status`
 - `ilink/bot/getupdates`
+- `ilink/bot/getconfig`
+- `ilink/bot/sendtyping`
 - `ilink/bot/sendmessage`
 - `ilink/bot/msg/notifystart`
 - `ilink/bot/msg/notifystop`

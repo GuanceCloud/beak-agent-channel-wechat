@@ -4,7 +4,7 @@
 
 Go SDK package for connecting Beak Channel Gateway to Weixin bot accounts through Tencent iLink Weixin APIs.
 
-This repository is importable library code. It is not a CLI, does not read user-authored runtime files, does not own persistence, and does not require users to edit server files. The Beak host owns UI, credential persistence, account state persistence, session creation, message writes, stream subscription, and runtime packaging. This SDK owns the Weixin connector logic: QR login, polling, text send, message dedupe, stream cursor handling, and Weixin-to-Beak message normalization.
+This repository is importable library code. It is not a CLI, does not read user-authored runtime files, does not own persistence, and does not require users to edit server files. The Beak host owns UI, credential persistence, account state persistence, session creation, message writes, stream subscription, and runtime packaging. This SDK owns the Weixin connector logic: QR login, polling, text send, typing status, message dedupe, stream cursor handling, and Weixin-to-Beak message normalization.
 
 ## Scope
 
@@ -13,12 +13,13 @@ This repository is importable library code. It is not a CLI, does not read user-
 - Host-backed credential and state persistence.
 - Text-only inbound Weixin messages to Beak sessions.
 - Text-only Beak agent stream output back to Weixin.
+- Weixin typing status through `getconfig` and `sendtyping`.
 - Direct chat and explicit group chat normalization.
 - One connected bot account plus one group chat maps to one Beak session; one connected bot account plus one direct chat maps to one Beak session.
 - If multiple Weixin bot accounts are in the same group, each bot account creates or reuses its own Beak session for that group.
 - One channel-link session is created per bot account connection, without creating a task.
 
-Out of v1 scope: media, voice, typing status, CDN/AES media upload/download, and Beak host code changes.
+Out of v1 scope: media, voice, CDN/AES media upload/download, and Beak host code changes.
 
 ## Package Layout
 
@@ -292,9 +293,10 @@ Inbound Weixin text:
 3. Connector skips non-text, incomplete, or duplicate updates.
 4. Connector normalizes chat identity from `group_id` or `from_user_id`.
 5. Connector caches the latest chat `context_token`.
-6. Gateway ensures one Beak session for `weixin:<account_uuid>:<chat_type>:<chat_id>`.
-7. Gateway writes Beak message as sender `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`.
-8. Gateway/bridge consumes Beak agent stream for the same session.
+6. Connector optionally sends Weixin typing status while the Beak agent is processing.
+7. Gateway ensures one Beak session for `weixin:<account_uuid>:<chat_type>:<chat_id>`.
+8. Gateway writes Beak message as sender `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`.
+9. Gateway/bridge consumes Beak agent stream for the same session.
 
 Outbound Beak agent text:
 
@@ -304,7 +306,9 @@ Outbound Beak agent text:
 4. Only message events from `AgentParticipantID()` are eligible for delivery.
 5. Connector dedupes by Beak message/event id.
 6. Connector calls `ilink/bot/sendmessage` with chat id and cached `context_token`.
-7. Connector persists `last_event_uuid` after successful send or intentional skip.
+7. Connector splits long text into compatible chunks before sending.
+8. Connector sends typing stop after successful delivery when typing was enabled.
+9. Connector persists `last_event_uuid` after successful send or intentional skip.
 
 The bridge reconnects with backoff and the last saved event cursor. This supports stream implementations that emit existing events plus heartbeat on connect.
 
@@ -315,6 +319,8 @@ The connector uses Tencent iLink Weixin endpoints internally:
 - `ilink/bot/get_bot_qrcode`
 - `ilink/bot/get_qrcode_status`
 - `ilink/bot/getupdates`
+- `ilink/bot/getconfig`
+- `ilink/bot/sendtyping`
 - `ilink/bot/sendmessage`
 - `ilink/bot/msg/notifystart`
 - `ilink/bot/msg/notifystop`

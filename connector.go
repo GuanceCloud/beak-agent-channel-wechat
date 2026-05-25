@@ -124,11 +124,15 @@ func (c Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbou
 	if toUserID == "" {
 		toUserID = req.AccountUUID
 	}
+	contextKey := outboundStateKey(req)
+	if contextKey == "" {
+		contextKey = toUserID
+	}
 	result, err := c.channel.SendText(ctx, native, SendTextRequest{
 		AccountID:    accountID,
 		ToUserID:     toUserID,
 		Text:         req.Text,
-		ContextToken: sdkAccountToState(account).ContextTokens[outboundStateKey(req)],
+		ContextToken: sdkAccountToState(account).ContextTokens[contextKey],
 	})
 	if err != nil {
 		return nil, err
@@ -348,6 +352,7 @@ func (s *connectorStateStore) SaveLogin(accountID, botToken, baseURL, ilinkUserI
 	account.BotToken = botToken
 	account.BaseURL = baseURL
 	account.ILinkUserID = ilinkUserID
+	account.MarkActive()
 	if err := s.SaveAccount(account); err != nil {
 		return nil, err
 	}
@@ -507,9 +512,12 @@ func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 		BaseURL:     stringValue(account.Credential["base_url"]),
 		ILinkUserID: stringValue(account.Credential["ilink_user_id"]),
 	}
+	state.Status = stringValue(account.State["status"])
+	state.LastError = stringValue(account.State["last_error"])
 	state.ChannelLinkSession = stringValue(account.State["channel_link_session"])
 	state.GetUpdatesBuf = stringValue(account.State["get_updates_buf"])
 	state.ContextTokens = stringMap(account.State["context_tokens"])
+	state.TypingTickets = stringMap(account.State["typing_tickets"])
 	state.PeerSessions = stringMap(account.State["peer_sessions"])
 	state.InboundSeen = stringMap(account.State["inbound_seen"])
 	state.SentBeakMessages = stringMap(account.State["sent_beak_messages"])
@@ -522,8 +530,11 @@ func stateToMap(account AccountState) map[string]any {
 	account.EnsureMaps()
 	return map[string]any{
 		"channel_link_session": account.ChannelLinkSession,
+		"status":               account.Status,
+		"last_error":           account.LastError,
 		"get_updates_buf":      account.GetUpdatesBuf,
 		"context_tokens":       account.ContextTokens,
+		"typing_tickets":       account.TypingTickets,
 		"peer_sessions":        account.PeerSessions,
 		"inbound_seen":         account.InboundSeen,
 		"sent_beak_messages":   account.SentBeakMessages,

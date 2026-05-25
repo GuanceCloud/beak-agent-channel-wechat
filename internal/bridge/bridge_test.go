@@ -58,6 +58,10 @@ func TestProcessUpdateCreatesSessionAndPostsOnce(t *testing.T) {
 	if account.ContextTokens["peer-1"] != "ctx-1" {
 		t.Fatalf("context token not stored")
 	}
+	wx := runner.wx.(*fakeWeixin)
+	if len(wx.typing) != 1 || wx.typing[0].status != weixin.TypingStatusStart {
+		t.Fatalf("typing=%+v", wx.typing)
+	}
 }
 
 func TestProcessGroupUpdateUsesGroupChatIdentity(t *testing.T) {
@@ -142,8 +146,57 @@ func TestProcessStreamEventSendsAgentMessageOnceAndStoresCursor(t *testing.T) {
 	if wx.sent[0].to != "peer-1" || wx.sent[0].text != "reply" || wx.sent[0].contextToken != "ctx-1" {
 		t.Fatalf("sent payload=%+v", wx.sent[0])
 	}
+	if len(wx.typing) != 1 || wx.typing[0].status != weixin.TypingStatusStop {
+		t.Fatalf("typing=%+v", wx.typing)
+	}
 	if account.StreamCursors["sess-1"] != "evt-1" {
 		t.Fatalf("cursor=%q", account.StreamCursors["sess-1"])
+	}
+}
+
+func TestPollMarksSessionExpired(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1", BotToken: "token-1", GetUpdatesBuf: "buf-1"}
+	account.EnsureMaps()
+	account.ContextTokens["peer-1"] = "ctx-1"
+	account.TypingTickets["peer-1"] = "ticket-1"
+	runner := testRunner(store, account)
+	runner.wx.(*fakeWeixin).updatesErr = weixin.ErrSessionExpired
+
+	err := runner.Poll(context.Background())
+	if err == nil {
+		t.Fatal("expected session expired error")
+	}
+	if !account.LoginRequired() || account.BotToken != "" || account.GetUpdatesBuf != "" || len(account.ContextTokens) != 0 || len(account.TypingTickets) != 0 {
+		t.Fatalf("account not marked expired: %+v", account)
+	}
+}
+
+func TestProcessStreamEventMarksSessionExpiredOnSend(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1", BotToken: "token-1"}
+	account.EnsureMaps()
+	account.ContextTokens["peer-1"] = "ctx-1"
+	account.PeerSessions["peer-1"] = "sess-1"
+	runner := testRunner(store, account)
+	runner.wx.(*fakeWeixin).sendErr = weixin.ErrSessionExpired
+
+	payload, _ := json.Marshal(beak.MessageEventPayload{
+		MessageUUID: "msg-1",
+		SenderID:    "agent:agent-1",
+		Content:     "reply",
+	})
+	err := runner.ProcessStreamEvent(context.Background(), "peer-1", beak.StreamEvent{
+		EventUUID:   "evt-1",
+		SessionUUID: "sess-1",
+		EventType:   "message",
+		Payload:     payload,
+	})
+	if err == nil {
+		t.Fatal("expected session expired error")
+	}
+	if !account.LoginRequired() || account.BotToken != "" || len(account.ContextTokens) != 0 {
+		t.Fatalf("account not marked expired: %+v", account)
 	}
 }
 
@@ -293,7 +346,10 @@ func (f *fakeBeak) StreamEvents(context.Context, string, beak.StreamRequest, fun
 }
 
 type fakeWeixin struct {
-	sent []sentMessage
+	sent       []sentMessage
+	typing     []typingMessage
+	updatesErr error
+	sendErr    error
 }
 
 type sentMessage struct {
@@ -302,12 +358,33 @@ type sentMessage struct {
 	contextToken string
 }
 
+type typingMessage struct {
+	to     string
+	ticket string
+	status int
+}
+
 func (f *fakeWeixin) GetUpdates(context.Context, string, time.Duration) (*weixin.GetUpdatesResponse, error) {
+	if f.updatesErr != nil {
+		return nil, f.updatesErr
+	}
 	return &weixin.GetUpdatesResponse{}, nil
 }
 
 func (f *fakeWeixin) SendText(_ context.Context, toUserID, text, contextToken string) error {
+	if f.sendErr != nil {
+		return f.sendErr
+	}
 	f.sent = append(f.sent, sentMessage{to: toUserID, text: text, contextToken: contextToken})
+	return nil
+}
+
+func (f *fakeWeixin) GetTypingTicket(context.Context, string, string) (string, error) {
+	return "ticket-1", nil
+}
+
+func (f *fakeWeixin) SendTyping(_ context.Context, toUserID, ticket string, status int) error {
+	f.typing = append(f.typing, typingMessage{to: toUserID, ticket: ticket, status: status})
 	return nil
 }
 

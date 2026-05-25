@@ -190,6 +190,7 @@ func (s *memoryStore) SaveLogin(accountID, botToken, baseURL, ilinkUserID string
 	account.BotToken = botToken
 	account.BaseURL = baseURL
 	account.ILinkUserID = ilinkUserID
+	account.MarkActive()
 	if err := s.SaveAccount(account); err != nil {
 		return nil, err
 	}

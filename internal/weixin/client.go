@@ -21,6 +21,7 @@ const (
 	DefaultClientVersion  = "0.1.0"
 	DefaultBotAgent       = "Beak Agent"
 	DefaultAppID          = "bot"
+	MaxTextRunes          = 2000
 	defaultClientVersion  = DefaultClientVersion
 	defaultAppID          = DefaultAppID
 	defaultBotAgent       = DefaultBotAgent
@@ -127,6 +128,22 @@ func (c *Client) SendText(ctx context.Context, toUserID, text, contextToken stri
 	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("text is required")
 	}
+	if strings.TrimSpace(contextToken) == "" {
+		return fmt.Errorf("context_token is required")
+	}
+	chunks := SplitText(text, MaxTextRunes)
+	if len(chunks) == 0 {
+		return fmt.Errorf("text is required")
+	}
+	for _, chunk := range chunks {
+		if err := c.sendTextChunk(ctx, toUserID, chunk, contextToken); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) sendTextChunk(ctx context.Context, toUserID, text, contextToken string) error {
 	body := SendMessageRequest{
 		Message: WeixinMessage{
 			ToUserID:     toUserID,
@@ -158,6 +175,75 @@ func (c *Client) SendText(ctx context.Context, toUserID, text, contextToken stri
 	}
 	if resp.Ret != 0 || resp.ErrCode != 0 {
 		return fmt.Errorf("send message failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
+	}
+	return nil
+}
+
+func (c *Client) GetTypingTicket(ctx context.Context, ilinkUserID, contextToken string) (string, error) {
+	if strings.TrimSpace(ilinkUserID) == "" {
+		return "", fmt.Errorf("ilink_user_id is required")
+	}
+	if strings.TrimSpace(contextToken) == "" {
+		return "", fmt.Errorf("context_token is required")
+	}
+	body := GetConfigRequest{
+		ILinkUserID:  ilinkUserID,
+		ContextToken: contextToken,
+		BaseInfo:     c.baseInfo(),
+	}
+	var resp GetConfigResponse
+	timeout := c.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultAPITimeout
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := c.doPOST(reqCtx, "ilink/bot/getconfig", body, &resp); err != nil {
+		return "", err
+	}
+	if resp.ErrCode == sessionExpiredErrCode {
+		return "", ErrSessionExpired
+	}
+	if resp.Ret != 0 || resp.ErrCode != 0 {
+		return "", fmt.Errorf("get config failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
+	}
+	if strings.TrimSpace(resp.TypingTicket) == "" {
+		return "", fmt.Errorf("get config failed: missing typing_ticket")
+	}
+	return resp.TypingTicket, nil
+}
+
+func (c *Client) SendTyping(ctx context.Context, ilinkUserID, typingTicket string, status int) error {
+	if strings.TrimSpace(ilinkUserID) == "" {
+		return fmt.Errorf("ilink_user_id is required")
+	}
+	if strings.TrimSpace(typingTicket) == "" {
+		return fmt.Errorf("typing_ticket is required")
+	}
+	if status != TypingStatusStart && status != TypingStatusStop {
+		return fmt.Errorf("unsupported typing status: %d", status)
+	}
+	body := SendTypingRequest{
+		ILinkUserID:  ilinkUserID,
+		TypingTicket: typingTicket,
+		Status:       status,
+		BaseInfo:     c.baseInfo(),
+	}
+	var resp SendTypingResponse
+	timeout := c.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultAPITimeout
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := c.doPOST(reqCtx, "ilink/bot/sendtyping", body, &resp); err != nil {
+		return err
+	}
+	if resp.ErrCode == sessionExpiredErrCode {
+		return ErrSessionExpired
+	}
+	if resp.Ret != 0 || resp.ErrCode != 0 {
+		return fmt.Errorf("send typing failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
 	}
 	return nil
 }
@@ -303,6 +389,65 @@ func newClientID() string {
 		return "beak-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
 	return "beak-" + strconv.FormatInt(time.Now().UnixNano(), 10) + "-" + base64.RawURLEncoding.EncodeToString(buf[:])
+}
+
+func SplitText(text string, maxRunes int) []string {
+	if maxRunes <= 0 {
+		maxRunes = MaxTextRunes
+	}
+	remaining := strings.TrimSpace(text)
+	var chunks []string
+	for runeCount(remaining) > maxRunes {
+		prefix := firstRunes(remaining, maxRunes)
+		cut := bestTextCut(prefix)
+		if cut <= 0 {
+			cut = len(prefix)
+		}
+		chunk := strings.TrimSpace(remaining[:cut])
+		if chunk != "" {
+			chunks = append(chunks, chunk)
+		}
+		remaining = strings.TrimSpace(remaining[cut:])
+	}
+	if remaining != "" {
+		chunks = append(chunks, remaining)
+	}
+	return chunks
+}
+
+func bestTextCut(prefix string) int {
+	if idx := strings.LastIndex(prefix, "\n\n"); idx > 0 {
+		return idx + len("\n\n")
+	}
+	if idx := strings.LastIndex(prefix, "\n"); idx > 0 {
+		return idx + len("\n")
+	}
+	if idx := strings.LastIndex(prefix, " "); idx > 0 {
+		return idx + len(" ")
+	}
+	return -1
+}
+
+func firstRunes(text string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	count := 0
+	for idx := range text {
+		if count == maxRunes {
+			return text[:idx]
+		}
+		count++
+	}
+	return text
+}
+
+func runeCount(text string) int {
+	count := 0
+	for range text {
+		count++
+	}
+	return count
 }
 
 func itoa64(value int64) string {

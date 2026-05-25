@@ -47,6 +47,9 @@ const (
 
 	MessageItemTypeText = 1
 
+	TypingStatusStart = 1
+	TypingStatusStop  = 2
+
 	ChatTypeDirect = "direct"
 	ChatTypeGroup  = "group"
 )
@@ -167,6 +170,32 @@ type SendMessageRequest struct {
 }
 
 type SendMessageResponse struct {
+	Ret     int    `json:"ret,omitempty"`
+	ErrCode int    `json:"errcode,omitempty"`
+	ErrMsg  string `json:"errmsg,omitempty"`
+}
+
+type GetConfigRequest struct {
+	ILinkUserID  string   `json:"ilink_user_id"`
+	ContextToken string   `json:"context_token,omitempty"`
+	BaseInfo     BaseInfo `json:"base_info"`
+}
+
+type GetConfigResponse struct {
+	Ret          int    `json:"ret,omitempty"`
+	ErrCode      int    `json:"errcode,omitempty"`
+	ErrMsg       string `json:"errmsg,omitempty"`
+	TypingTicket string `json:"typing_ticket,omitempty"`
+}
+
+type SendTypingRequest struct {
+	ILinkUserID  string   `json:"ilink_user_id"`
+	TypingTicket string   `json:"typing_ticket"`
+	Status       int      `json:"status"`
+	BaseInfo     BaseInfo `json:"base_info"`
+}
+
+type SendTypingResponse struct {
 	Ret     int    `json:"ret,omitempty"`
 	ErrCode int    `json:"errcode,omitempty"`
 	ErrMsg  string `json:"errmsg,omitempty"`

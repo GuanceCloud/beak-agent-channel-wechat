@@ -181,6 +181,10 @@ func TestChannelStartUsesInjectedRuntimeAndStore(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "get_updates_buf": "buf-1"})
+		case "/ilink/bot/getconfig":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "typing_ticket": "typing-ticket-1"})
+		case "/ilink/bot/sendtyping":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -274,6 +278,7 @@ func (s *memoryStore) SaveLogin(accountID, botToken, baseURL, ilinkUserID string
 	account.BotToken = botToken
 	account.BaseURL = baseURL
 	account.ILinkUserID = ilinkUserID
+	account.MarkActive()
 	if err := s.SaveAccount(account); err != nil {
 		return nil, err
 	}

@@ -47,6 +47,7 @@ type WeixinOptions struct {
 	LoginTimeout     time.Duration
 	LongPollTimeout  time.Duration
 	RequestTimeout   time.Duration
+	DisableTyping    bool
 }
 
 func (c *Options) ApplyDefaults() {

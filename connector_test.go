@@ -165,6 +165,31 @@ func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "get_updates_buf": "buf-scenario-1"})
+		case "/ilink/bot/getconfig":
+			var body struct {
+				ILinkUserID  string `json:"ilink_user_id"`
+				ContextToken string `json:"context_token"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.ILinkUserID != "user-scenario-1" || body.ContextToken != "ctx-scenario-1" {
+				t.Fatalf("getconfig body=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "typing_ticket": "typing-ticket-scenario-1"})
+		case "/ilink/bot/sendtyping":
+			var body struct {
+				ILinkUserID  string `json:"ilink_user_id"`
+				TypingTicket string `json:"typing_ticket"`
+				Status       int    `json:"status"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.ILinkUserID != "user-scenario-1" || body.TypingTicket != "typing-ticket-scenario-1" || (body.Status != 1 && body.Status != 2) {
+				t.Fatalf("sendtyping body=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
 		case "/ilink/bot/sendmessage":
 			if got := r.Header.Get("Authorization"); got != "Bearer token-scenario-1" {
 				t.Fatalf("Authorization=%q", got)
@@ -351,6 +376,10 @@ func TestWeixinConnectorStartProcessesInboundWithRuntimeAccount(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "get_updates_buf": "buf-1"})
+		case "/ilink/bot/getconfig":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "typing_ticket": "typing-ticket-1"})
+		case "/ilink/bot/sendtyping":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}

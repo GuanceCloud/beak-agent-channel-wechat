@@ -762,6 +762,8 @@ Gateway 和 connector 都需要配合 dedupe。
 - `ilink/bot/get_bot_qrcode`
 - `ilink/bot/get_qrcode_status`
 - `ilink/bot/getupdates`
+- `ilink/bot/getconfig`
+- `ilink/bot/sendtyping`
 - `ilink/bot/sendmessage`
 - `ilink/bot/msg/notifystart`
 - `ilink/bot/msg/notifystop`
@@ -781,13 +783,16 @@ Gateway 和 connector 都需要配合 dedupe。
 ```json
 {
   "get_updates_buf": "...",
-  "context_tokens": {
-    "user_123": "...",
-    "group:group_456": "..."
-  },
-  "inbound_seen": {},
-  "stream_cursors": {},
-  "sent_beak_messages": {}
+	  "context_tokens": {
+	    "user_123": "...",
+	    "group:group_456": "..."
+	  },
+	  "typing_tickets": {
+	    "user_123": "..."
+	  },
+	  "inbound_seen": {},
+	  "stream_cursors": {},
+	  "sent_beak_messages": {}
 }
 ```
 
@@ -798,7 +803,8 @@ Gateway 和 connector 都需要配合 dedupe。
 - 支持扫码登录。
 - 支持文本入站。
 - 支持文本出站。
-- 不支持 media、voice、typing status。
+- 支持 typing status。
+- 不支持 media、voice。
 - 不要求微信 connector 维护本地配置文件。
 - 不把微信 connector 做成 CLI。
 
@@ -820,7 +826,7 @@ Gateway 和 connector 都需要配合 dedupe。
 - 不新增 Beak DB migration。
 - 不实现 Beak host 的 Gateway API。
 - 不接入飞书或 DingTalk 实际 API。
-- 不实现 media、voice、typing status。
+- 不实现 media、voice。
 - 不把微信 connector 做成 CLI。
 - 不让 SDK 维护本地配置文件或本地状态目录。
 

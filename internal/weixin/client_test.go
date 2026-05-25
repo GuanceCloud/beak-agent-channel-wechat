@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,6 +82,98 @@ func TestSendTextBuildsMessageRequest(t *testing.T) {
 	client := NewClient(server.URL, "token-1")
 	if err := client.SendText(context.Background(), "peer-1", "hello", "ctx-1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSendTextRequiresContextToken(t *testing.T) {
+	client := NewClient("https://example.invalid", "token-1")
+	err := client.SendText(context.Background(), "peer-1", "hello", "")
+	if err == nil || !strings.Contains(err.Error(), "context_token") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSendTextSplitsLongMessage(t *testing.T) {
+	var texts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/sendmessage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var body SendMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Message.ContextToken != "ctx-1" {
+			t.Fatalf("context_token=%q", body.Message.ContextToken)
+		}
+		if len(body.Message.ItemList) != 1 || body.Message.ItemList[0].TextItem == nil {
+			t.Fatalf("unexpected item_list: %+v", body.Message.ItemList)
+		}
+		texts = append(texts, body.Message.ItemList[0].TextItem.Text)
+		_ = json.NewEncoder(w).Encode(SendMessageResponse{Ret: 0})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token-1")
+	longText := strings.Repeat("你", MaxTextRunes) + "\n\n" + strings.Repeat("好", 10)
+	if err := client.SendText(context.Background(), "peer-1", longText, "ctx-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(texts) != 2 {
+		t.Fatalf("chunks=%d texts=%+v", len(texts), texts)
+	}
+	if runeCount(texts[0]) > MaxTextRunes || runeCount(texts[1]) > MaxTextRunes {
+		t.Fatalf("chunk sizes=%d,%d", runeCount(texts[0]), runeCount(texts[1]))
+	}
+	if strings.Join(texts, "") != strings.Repeat("你", MaxTextRunes)+strings.Repeat("好", 10) {
+		t.Fatalf("unexpected split texts=%+v", texts)
+	}
+}
+
+func TestTypingEndpointsBuildRequests(t *testing.T) {
+	var gotConfig bool
+	var gotTyping bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ilink/bot/getconfig":
+			gotConfig = true
+			var body GetConfigRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.ILinkUserID != "peer-1" || body.ContextToken != "ctx-1" {
+				t.Fatalf("getconfig body=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(GetConfigResponse{Ret: 0, TypingTicket: "ticket-1"})
+		case "/ilink/bot/sendtyping":
+			gotTyping = true
+			var body SendTypingRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.ILinkUserID != "peer-1" || body.TypingTicket != "ticket-1" || body.Status != TypingStatusStart {
+				t.Fatalf("sendtyping body=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(SendTypingResponse{Ret: 0})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token-1")
+	ticket, err := client.GetTypingTicket(context.Background(), "peer-1", "ctx-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket != "ticket-1" {
+		t.Fatalf("ticket=%q", ticket)
+	}
+	if err := client.SendTyping(context.Background(), "peer-1", ticket, TypingStatusStart); err != nil {
+		t.Fatal(err)
+	}
+	if !gotConfig || !gotTyping {
+		t.Fatalf("gotConfig=%v gotTyping=%v", gotConfig, gotTyping)
 	}
 }
 
