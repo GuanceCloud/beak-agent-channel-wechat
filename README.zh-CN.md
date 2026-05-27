@@ -20,13 +20,12 @@ v1 支持：
 - 一个已连接 bot account 中的一个群聊对应一个 Beak session。
 - 一个已连接 bot account 中的一个单聊对应一个 Beak session。
 - 如果同一个微信群里接入多个微信 bot account，每个 bot account 都创建或复用自己的 Beak session。
-- 每个 bot account 连接创建一个 channel-link session，但不创建 task。
+- bot account 连接保存在 `channel_accounts`，启动连接不会创建 task，也不会额外创建 link session。
 
 v1 不支持：
 
 - media、voice。
 - CDN/AES 媒体上传下载。
-- 修改 Beak host 代码。
 - 把微信 connector 做成 CLI。
 - 让 SDK 维护本地配置文件或本地状态目录。
 
@@ -37,14 +36,14 @@ v1 不支持：
 - `internal/weixin`：Tencent iLink Weixin HTTP client 和协议模型。
 - `internal/bridge`：微信 update 到 Beak session/message/stream 的 bridge。
 - `internal/beak`：面向测试和参考代码的 REST 风格 Beak runtime adapter。
-- `docs/beak-channel-gateway-implementation.md`：Beak host 后续实现 Channel Gateway 的工程说明。
+- `docs/beak-channel-gateway-implementation.md`：Beak host 实现 Channel Gateway 的工程说明。
 
 ## 公开入口
 
 ```go
 import (
-	beakweixin "beak-agent-weixin"
-	"beak-agent-weixin/sdk"
+	beakweixin "github.com/GuanceCloud/beak-agent-channel-wechat"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
 )
 
 func WeixinConnector() sdk.Connector {
@@ -247,10 +246,11 @@ workspace_uuid + platform + account_uuid + chat_type + chat_id
 
 ```text
 platform=weixin
-session_type=manual
-source_type=im_chat
+session_type=conversation
 source_id=weixin:<account_uuid>:<chat_type>:<chat_id>
 ```
+
+`source_type` 不参与 Gateway 归一规则。除非这个 session 命中 Beak 已有来源对象语义，否则保持为空，不为 IM Gateway 新增专用值。
 
 单聊：
 
@@ -285,15 +285,7 @@ agent:<agent_uuid>
 bridge:weixin
 ```
 
-Connector 每个 account connection 会创建或复用一个 channel-link session：
-
-```text
-platform=weixin
-source_type=weixin_channel_link
-source_id=<account_id>
-```
-
-channel-link session 只表示账号连接关系，不创建 Beak task。
+账号连接本身由 `channel_accounts` 表示，不再额外创建 Beak session。启动 connector account 不能创建 Beak task。
 
 ## 消息流
 

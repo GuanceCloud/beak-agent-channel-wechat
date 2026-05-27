@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"beak-agent-weixin/internal/weixin"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
 )
 
 const (

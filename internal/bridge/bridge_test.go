@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"beak-agent-weixin/internal/beak"
-	"beak-agent-weixin/internal/weixin"
-	"beak-agent-weixin/sdk"
-	"beak-agent-weixin/state"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/beak"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/state"
 )
 
 func TestProcessUpdateCreatesSessionAndPostsOnce(t *testing.T) {

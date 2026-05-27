@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"beak-agent-weixin/internal/channel"
-	"beak-agent-weixin/internal/weixin"
-	"beak-agent-weixin/state"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/channel"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/state"
 )
 
 const (
