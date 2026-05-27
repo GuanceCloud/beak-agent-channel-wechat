@@ -3,8 +3,8 @@ package basic
 import (
 	"context"
 
-	beakweixin "beak-agent-weixin"
-	"beak-agent-weixin/sdk"
+	beakweixin "github.com/GuanceCloud/beak-agent-channel-wechat"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
 )
 
 func Connector() sdk.Connector {

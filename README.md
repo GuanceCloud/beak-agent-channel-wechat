@@ -17,9 +17,9 @@ This repository is importable library code. It is not a CLI, does not read user-
 - Direct chat and explicit group chat normalization.
 - One connected bot account plus one group chat maps to one Beak session; one connected bot account plus one direct chat maps to one Beak session.
 - If multiple Weixin bot accounts are in the same group, each bot account creates or reuses its own Beak session for that group.
-- One channel-link session is created per bot account connection, without creating a task.
+- The bot account connection is stored as `channel_accounts`; starting it does not create a task or an extra link session.
 
-Out of v1 scope: media, voice, CDN/AES media upload/download, and Beak host code changes.
+Out of v1 scope for this Weixin SDK: media, voice, and CDN/AES media upload/download.
 
 ## Package Layout
 
@@ -28,14 +28,14 @@ Out of v1 scope: media, voice, CDN/AES media upload/download, and Beak host code
 - `internal/weixin`: Tencent iLink Weixin HTTP client and protocol models.
 - `internal/bridge`: Weixin update to Beak session/message/stream bridge.
 - `internal/beak`: REST-oriented Beak runtime adapter used by tests and reference code.
-- `docs/beak-channel-gateway-implementation.md`: Beak host implementation guide for the future Channel Gateway.
+- `docs/beak-channel-gateway-implementation.md`: Beak host implementation guide for Channel Gateway.
 
 ## Public Entrypoints
 
 ```go
 import (
-	beakweixin "beak-agent-weixin"
-	"beak-agent-weixin/sdk"
+	beakweixin "github.com/GuanceCloud/beak-agent-channel-wechat"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
 )
 
 func WeixinConnector() sdk.Connector {
@@ -236,10 +236,11 @@ Recommended Beak session fields:
 
 ```text
 platform=weixin
-session_type=manual
-source_type=im_chat
+session_type=conversation
 source_id=weixin:<account_uuid>:<chat_type>:<chat_id>
 ```
+
+`source_type` is not part of the Gateway identity rule. Leave it empty unless the session is tied to an existing Beak source object with established semantics.
 
 Direct chat:
 
@@ -274,15 +275,7 @@ agent:<agent_uuid>
 bridge:weixin
 ```
 
-The connector creates or reuses one channel-link session per account connection:
-
-```text
-platform=weixin
-source_type=weixin_channel_link
-source_id=<account_id>
-```
-
-The channel-link session is only the account connection record. It must not create a Beak task.
+The account connection itself is represented by `channel_accounts`, not by an additional Beak session. Starting a connector account must not create a Beak task.
 
 ## Message Flow
 

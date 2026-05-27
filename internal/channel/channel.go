@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"beak-agent-weixin/internal/beak"
-	"beak-agent-weixin/internal/bridge"
-	"beak-agent-weixin/internal/weixin"
-	"beak-agent-weixin/state"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/beak"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/bridge"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/state"
 )
 
 type AccountState = state.AccountState
