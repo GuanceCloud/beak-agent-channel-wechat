@@ -186,7 +186,7 @@ Each `sdk.ChannelAccount` should include:
 - `Credential`: decrypted credential JSON for this process only.
 - `State`: persisted connector state JSON.
 
-The connector starts Weixin update polling for each account and sends standardized inbound messages into the injected Gateway runtime.
+The connector starts Weixin update polling for each account and sends standardized inbound messages into the injected Gateway runtime. The SDK `InboundMessage` contract includes `mentions` and `mentioned_me`; the current iLink text path leaves them empty unless future Weixin update payloads expose mention metadata.
 
 ## Credential And State
 
