@@ -15,8 +15,7 @@ import (
 )
 
 func TestWeixinConnectorMetadataAndSchema(t *testing.T) {
-	connector := NewConnector()
-	var _ sdk.Connector = connector
+	var connector sdk.Connector = NewConnector()
 
 	metadata := connector.Metadata()
 	if metadata.ID != ID || metadata.Platform != Platform || metadata.Label != "Weixin" {
@@ -341,6 +340,36 @@ func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
 	if !ok || sentBeakMessages["agent-message-scenario-1"] == "" {
 		t.Fatalf("sent beak messages=%+v", state["sent_beak_messages"])
 	}
+
+	status.Account.State = state
+	mentionResult, err := connector.Send(context.Background(), sdk.Runtime{
+		Account:    status.Account,
+		HTTPClient: httpClient,
+	}, sdk.OutboundMessage{
+		AccountUUID: "account-scenario-1",
+		ChatType:    sdk.ChatTypeDirect,
+		ChatID:      "user-scenario-1",
+		Text:        "mention reply",
+		MessageUUID: "agent-message-mention",
+		MentionAll:  true,
+		Mentions: []sdk.MentionIdentity{
+			{ID: "user-scenario-1", IDType: "user_id", DisplayName: "Alice"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mentionResult.AccountUUID != "account-scenario-1" || mentionResult.Platform != Platform {
+		t.Fatalf("mention result=%+v", mentionResult)
+	}
+	select {
+	case sent = <-sentCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for mention reply to be sent to weixin")
+	}
+	if sent.to != "user-scenario-1" || sent.text != "@all @Alice\nmention reply" || sent.contextToken != "ctx-scenario-1" {
+		t.Fatalf("mention sent=%+v", sent)
+	}
 }
 
 func TestWeixinConnectorStartProcessesInboundWithRuntimeAccount(t *testing.T) {
@@ -452,6 +481,161 @@ func TestWeixinConnectorStartProcessesInboundWithRuntimeAccount(t *testing.T) {
 	}
 }
 
+func TestWeixinConnectorScenarioPollingDedupesAndCachesChatContext(t *testing.T) {
+	var updatesServed int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ilink/bot/msg/notifystart", "/ilink/bot/msg/notifystop":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+		case "/ilink/bot/getupdates":
+			var body struct {
+				GetUpdatesBuf string `json:"get_updates_buf"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			updatesServed++
+			switch updatesServed {
+			case 1:
+				if body.GetUpdatesBuf != "" {
+					t.Fatalf("first getupdates buf=%q", body.GetUpdatesBuf)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ret":             0,
+					"get_updates_buf": "buf-scenario-2-a",
+					"msgs": []map[string]any{
+						{
+							"message_id":    201,
+							"from_user_id":  "user-group-1",
+							"to_user_id":    "bot-scenario-2",
+							"group_id":      "group-scenario-2",
+							"message_type":  1,
+							"message_state": 2,
+							"context_token": "ctx-group-2",
+							"mention_all":   true,
+							"mentions": []map[string]any{
+								{"user_id": "user-group-1", "name": "Alice"},
+							},
+							"item_list": []map[string]any{
+								{"type": 1, "text_item": map[string]any{"text": "group hello"}},
+							},
+						},
+					},
+				})
+			case 2:
+				if body.GetUpdatesBuf != "buf-scenario-2-a" {
+					t.Fatalf("second getupdates buf=%q", body.GetUpdatesBuf)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ret":             0,
+					"get_updates_buf": "buf-scenario-2-b",
+					"msgs": []map[string]any{
+						{
+							"message_id":    201,
+							"from_user_id":  "user-group-1",
+							"to_user_id":    "bot-scenario-2",
+							"group_id":      "group-scenario-2",
+							"message_type":  1,
+							"message_state": 2,
+							"context_token": "ctx-duplicate-should-not-win",
+							"item_list": []map[string]any{
+								{"type": 1, "text_item": map[string]any{"text": "duplicate group"}},
+							},
+						},
+						{
+							"message_id":    202,
+							"from_user_id":  "user-direct-2",
+							"message_type":  1,
+							"message_state": 2,
+							"context_token": "ctx-direct-2",
+							"item_list": []map[string]any{
+								{"type": 1, "text_item": map[string]any{"text": "direct hello"}},
+							},
+						},
+					},
+				})
+			default:
+				if body.GetUpdatesBuf != "buf-scenario-2-b" {
+					t.Fatalf("later getupdates buf=%q", body.GetUpdatesBuf)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "get_updates_buf": "buf-scenario-2-b"})
+			}
+		case "/ilink/bot/getconfig":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "typing_ticket": "typing-ticket-scenario-2"})
+		case "/ilink/bot/sendtyping":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	gateway := &fakeSDKGateway{}
+	accountStore := newFakeSDKAccountStore()
+	connector := NewConnector()
+	ctx, cancel := context.WithTimeout(context.Background(), 160*time.Millisecond)
+	defer cancel()
+	err := connector.Start(ctx, sdk.Runtime{
+		WorkspaceUUID: "workspace-2",
+		Channel:       sdk.Channel{UUID: "channel-2", WorkspaceUUID: "workspace-2", Platform: Platform},
+		Account: sdk.ChannelAccount{
+			UUID:          "account-scenario-2",
+			WorkspaceUUID: "workspace-2",
+			ChannelUUID:   "channel-2",
+			Platform:      Platform,
+			Credential: map[string]any{
+				"account_id":    "account-scenario-2",
+				"bot_token":     "token-scenario-2",
+				"base_url":      server.URL,
+				"ilink_user_id": "ilink-user-scenario-2",
+			},
+			State: map[string]any{},
+		},
+		Gateway:         gateway,
+		AccountStore:    accountStore,
+		PollInterval:    time.Millisecond,
+		StreamReconnect: time.Millisecond,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Start error=%v", err)
+	}
+
+	gateway.mu.Lock()
+	chatSessions := append([]sdk.EnsureChatSessionRequest(nil), gateway.chatSessions...)
+	messages := append([]sdk.CreateMessageRequest(nil), gateway.messages...)
+	gateway.mu.Unlock()
+	if len(chatSessions) != 2 {
+		t.Fatalf("chat sessions=%+v", chatSessions)
+	}
+	if chatSessions[0].ChatType != sdk.ChatTypeGroup || chatSessions[0].ChatID != "group-scenario-2" ||
+		chatSessions[1].ChatType != sdk.ChatTypeDirect || chatSessions[1].ChatID != "user-direct-2" {
+		t.Fatalf("chat sessions=%+v", chatSessions)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages=%+v", messages)
+	}
+	if messages[0].Content != "group hello" || messages[1].Content != "direct hello" {
+		t.Fatalf("messages=%+v", messages)
+	}
+	inbound, ok := messages[0].Metadata["inbound_message"].(sdk.InboundMessage)
+	if !ok || !inbound.MentionAll || !inbound.MentionedMe || len(inbound.Mentions) != 2 {
+		t.Fatalf("inbound=%+v metadata=%+v", inbound, messages[0].Metadata)
+	}
+
+	state := accountStore.state("account-scenario-2")
+	if state["get_updates_buf"] != "buf-scenario-2-b" {
+		t.Fatalf("state=%+v", state)
+	}
+	contextTokens, ok := state["context_tokens"].(map[string]string)
+	if !ok || contextTokens["group:group-scenario-2"] != "ctx-group-2" || contextTokens["user-direct-2"] != "ctx-direct-2" {
+		t.Fatalf("context tokens=%+v", state["context_tokens"])
+	}
+	inboundSeen, ok := state["inbound_seen"].(map[string]string)
+	if !ok || len(inboundSeen) != 2 || inboundSeen["account-scenario-2:message:201"] == "" || inboundSeen["account-scenario-2:message:202"] == "" {
+		t.Fatalf("inbound seen=%+v", state["inbound_seen"])
+	}
+}
+
 func TestWeixinConnectorSendUsesRequestedAccount(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ilink/bot/sendmessage" {
@@ -477,7 +661,7 @@ func TestWeixinConnectorSendUsesRequestedAccount(t *testing.T) {
 		if body.Message.ToUserID != "group-1" || body.Message.ContextToken != "ctx-account-2" {
 			t.Fatalf("message=%+v", body.Message)
 		}
-		if len(body.Message.ItemList) != 1 || body.Message.ItemList[0].TextItem.Text != "reply" {
+		if len(body.Message.ItemList) != 1 || body.Message.ItemList[0].TextItem.Text != "@all @Alice\nreply" {
 			t.Fatalf("items=%+v", body.Message.ItemList)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
@@ -495,11 +679,102 @@ func TestWeixinConnectorSendUsesRequestedAccount(t *testing.T) {
 		ChatType:    sdk.ChatTypeGroup,
 		ChatID:      "group-1",
 		Text:        "reply",
+		MentionAll:  true,
+		Mentions: []sdk.MentionIdentity{
+			{ID: "user-1", IDType: "user_id", DisplayName: "Alice"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.AccountUUID != "account-2" || result.Platform != Platform {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestWeixinConnectorSendRawMentions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/sendmessage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var body struct {
+			Message struct {
+				ItemList []struct {
+					TextItem struct {
+						Text string `json:"text"`
+					} `json:"text_item"`
+				} `json:"item_list"`
+			} `json:"msg"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Message.ItemList) != 1 || body.Message.ItemList[0].TextItem.Text != "@all @Raw User\nreply" {
+			t.Fatalf("items=%+v", body.Message.ItemList)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+	}))
+	defer server.Close()
+
+	_, err := NewConnector().Send(context.Background(), sdk.Runtime{
+		Account: sdkAccount("account-1", "token-1", server.URL, map[string]string{"group:group-1": "ctx-1"}),
+	}, sdk.OutboundMessage{
+		AccountUUID: "account-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "group-1",
+		Text:        "reply",
+		Raw: map[string]any{
+			"mentionAll": true,
+			"mentions": []any{
+				map[string]any{"id": "raw-user", "display_name": "Raw User"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWeixinConnectorSendLoadsLatestAccountState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/sendmessage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var body struct {
+			Message struct {
+				ToUserID     string `json:"to_user_id"`
+				ContextToken string `json:"context_token"`
+			} `json:"msg"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Message.ToUserID != "group-1" || body.Message.ContextToken != "ctx-loaded" {
+			t.Fatalf("message=%+v", body.Message)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+	}))
+	defer server.Close()
+
+	store := newFakeSDKAccountStore()
+	if err := store.SaveChannelAccountState(context.Background(), "account-1", map[string]any{
+		"context_tokens": map[string]string{"group:group-1": "ctx-loaded"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewConnector().Send(context.Background(), sdk.Runtime{
+		Account:      sdkAccount("account-1", "token-1", server.URL, nil),
+		AccountStore: store,
+	}, sdk.OutboundMessage{
+		AccountUUID: "account-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "group-1",
+		Text:        "reply",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AccountUUID != "account-1" || result.Platform != Platform {
 		t.Fatalf("result=%+v", result)
 	}
 }
@@ -677,6 +952,10 @@ func (s *fakeSDKAccountStore) SaveChannelAccountState(_ context.Context, account
 	}
 	s.states[accountUUID] = copied
 	return nil
+}
+
+func (s *fakeSDKAccountStore) LoadChannelAccountState(_ context.Context, accountUUID string) (map[string]any, error) {
+	return s.state(accountUUID), nil
 }
 
 func (s *fakeSDKAccountStore) state(accountUUID string) map[string]any {

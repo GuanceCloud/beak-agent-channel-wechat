@@ -78,6 +78,12 @@ func TestProcessGroupUpdateUsesGroupChatIdentity(t *testing.T) {
 		MessageType:  weixin.MessageTypeUser,
 		MessageState: weixin.MessageStateFinish,
 		ContextToken: "ctx-group-1",
+		MentionedMe:  true,
+		MentionAll:   true,
+		Mentions: []weixin.Mention{
+			{UserID: "user-2", Name: "Bob"},
+			{OpenID: "open-1", DisplayName: "Alice"},
+		},
 		ItemList: []weixin.MessageItem{
 			{Type: weixin.MessageItemTypeText, TextItem: &weixin.TextItem{Text: "hello group"}},
 		},
@@ -111,6 +117,12 @@ func TestProcessGroupUpdateUsesGroupChatIdentity(t *testing.T) {
 	}
 	if inbound.ChannelUUID != "channel-1" || inbound.AccountUUID != "account-1" || inbound.ChatType != sdk.ChatTypeGroup || inbound.ChatID != "group-1" || inbound.SenderID != "user-1" || inbound.Text != "hello group" {
 		t.Fatalf("inbound=%+v", inbound)
+	}
+	if !inbound.MentionedMe || !inbound.MentionAll || len(inbound.Mentions) != 3 {
+		t.Fatalf("inbound mentions=%+v mentioned_me=%v mention_all=%v", inbound.Mentions, inbound.MentionedMe, inbound.MentionAll)
+	}
+	if inbound.Raw["mention_all"] != true {
+		t.Fatalf("raw=%+v", inbound.Raw)
 	}
 }
 
@@ -293,7 +305,7 @@ func newMemoryStore() *memoryStore {
 	return &memoryStore{accounts: make(map[string]*state.AccountState)}
 }
 
-func (s *memoryStore) LoadAccount(accountID string) (*state.AccountState, error) {
+func (s *memoryStore) LoadAccount(ctx context.Context, accountID string) (*state.AccountState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if account, ok := s.accounts[accountID]; ok {
@@ -305,7 +317,7 @@ func (s *memoryStore) LoadAccount(accountID string) (*state.AccountState, error)
 	return account, nil
 }
 
-func (s *memoryStore) SaveAccount(account *state.AccountState) error {
+func (s *memoryStore) SaveAccount(ctx context.Context, account *state.AccountState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := state.TouchAccount(account); err != nil {

@@ -34,8 +34,8 @@ type BeakClient interface {
 }
 
 type StateStore interface {
-	LoadAccount(accountID string) (*state.AccountState, error)
-	SaveAccount(account *state.AccountState) error
+	LoadAccount(ctx context.Context, accountID string) (*state.AccountState, error)
+	SaveAccount(ctx context.Context, account *state.AccountState) error
 }
 
 type WeixinFactory func(account state.AccountState, accountCfg AccountConfig) WeixinClient
@@ -95,7 +95,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 }
 
 func (b *Bridge) runAccount(ctx context.Context, accountCfg AccountConfig) error {
-	account, err := b.store.LoadAccount(accountCfg.AccountID)
+	account, err := b.store.LoadAccount(ctx, accountCfg.AccountID)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func (b *Bridge) runAccount(ctx context.Context, accountCfg AccountConfig) error
 	if account.BaseURL == "" {
 		account.BaseURL = b.options.Weixin.BaseURL
 	}
-	if err := b.store.SaveAccount(account); err != nil {
+	if err := b.store.SaveAccount(ctx, account); err != nil {
 		return err
 	}
 	channelLinkSession, err := b.beak.EnsureChannelLinkSession(ctx, b.options.WorkspaceRef, account.AccountID, b.options.AgentParticipantID, b.options.BridgeParticipantID)
@@ -117,7 +117,7 @@ func (b *Bridge) runAccount(ctx context.Context, accountCfg AccountConfig) error
 	}
 	if account.ChannelLinkSession != channelLinkSession {
 		account.ChannelLinkSession = channelLinkSession
-		if err := b.store.SaveAccount(account); err != nil {
+		if err := b.store.SaveAccount(ctx, account); err != nil {
 			return err
 		}
 	}
@@ -176,7 +176,7 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 		resp, err := r.wx.GetUpdates(ctx, buf, longPollTimeout+2*time.Second)
 		if err != nil {
 			if errors.Is(err, weixin.ErrSessionExpired) {
-				_ = r.markSessionExpired("getupdates session expired")
+				_ = r.markSessionExpired(ctx, "getupdates session expired")
 				return fmt.Errorf("weixin account %s session expired; run login again: %w", r.account.AccountID, err)
 			}
 			r.logger.Printf("getUpdates account=%s error=%v", r.account.AccountID, err)
@@ -189,7 +189,7 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 		r.mu.Lock()
 		if resp.GetUpdatesBuf != "" {
 			r.account.GetUpdatesBuf = resp.GetUpdatesBuf
-			_ = r.store.SaveAccount(r.account)
+			_ = r.store.SaveAccount(ctx, r.account)
 		}
 		r.mu.Unlock()
 
@@ -277,14 +277,14 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 	if msg.ContextToken != "" {
 		r.account.ContextTokens[chatKey] = msg.ContextToken
 	}
-	err = r.store.SaveAccount(r.account)
+	err = r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	if err != nil {
 		return "", false, err
 	}
 	if err := r.sendTyping(ctx, chatKey, weixin.TypingStatusStart); err != nil {
 		if errors.Is(err, weixin.ErrSessionExpired) {
-			_ = r.markSessionExpired("typing session expired")
+			_ = r.markSessionExpired(ctx, "typing session expired")
 			return "", false, err
 		}
 		r.logger.Printf("send typing start account=%s peer=%s error=%v", r.account.AccountID, chatKey, err)
@@ -298,6 +298,12 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 	if msg.MessageID != 0 {
 		messageID = fmt.Sprint(msg.MessageID)
 	}
+	mentions := weixinMentionIdentities(msg.Mentions)
+	mentionAll := msg.MentionAll || msg.IsAtAll
+	if mentionAll {
+		mentions = append(mentions, sdk.MentionIdentity{ID: "all", IDType: "mention_all", DisplayName: "all"})
+		mentions = uniqueMentionIdentities(mentions)
+	}
 	return sdk.InboundMessage{
 		WorkspaceUUID: workspaceRef,
 		Platform:      beak.PlatformWeixin,
@@ -309,6 +315,9 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 		MessageID:     messageID,
 		Text:          text,
 		DedupeKey:     msg.DedupeKey(accountID),
+		Mentions:      mentions,
+		MentionedMe:   msg.MentionedMe || msg.IsInAtList || mentionAll,
+		MentionAll:    mentionAll,
 		Raw: map[string]any{
 			"seq":             msg.Seq,
 			"message_id":      msg.MessageID,
@@ -322,8 +331,68 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 			"message_state":   msg.MessageState,
 			"context_token":   msg.ContextToken,
 			"item_list_count": len(msg.ItemList),
+			"mentions":        msg.Mentions,
+			"mentioned_me":    msg.MentionedMe || msg.IsInAtList,
+			"mention_all":     mentionAll,
 		},
 	}
+}
+
+func weixinMentionIdentities(mentions []weixin.Mention) []sdk.MentionIdentity {
+	out := make([]sdk.MentionIdentity, 0, len(mentions))
+	for _, mention := range mentions {
+		displayName := firstString(mention.DisplayName, mention.Name)
+		idType := strings.TrimSpace(mention.IDType)
+		if id := strings.TrimSpace(mention.ID); id != "" {
+			if idType == "" {
+				idType = "user_id"
+			}
+			out = append(out, sdk.MentionIdentity{ID: id, IDType: idType, DisplayName: displayName})
+			continue
+		}
+		if id := strings.TrimSpace(mention.UserID); id != "" {
+			out = append(out, sdk.MentionIdentity{ID: id, IDType: "user_id", DisplayName: displayName})
+		}
+		if id := strings.TrimSpace(mention.OpenID); id != "" {
+			out = append(out, sdk.MentionIdentity{ID: id, IDType: "open_id", DisplayName: displayName})
+		}
+		if id := strings.TrimSpace(mention.UnionID); id != "" {
+			out = append(out, sdk.MentionIdentity{ID: id, IDType: "union_id", DisplayName: displayName})
+		}
+		if id := strings.TrimSpace(mention.Mobile); id != "" {
+			out = append(out, sdk.MentionIdentity{ID: id, IDType: "mobile", DisplayName: displayName})
+		}
+	}
+	return uniqueMentionIdentities(out)
+}
+
+func uniqueMentionIdentities(mentions []sdk.MentionIdentity) []sdk.MentionIdentity {
+	seen := make(map[string]struct{}, len(mentions))
+	out := make([]sdk.MentionIdentity, 0, len(mentions))
+	for _, mention := range mentions {
+		mention.ID = strings.TrimSpace(mention.ID)
+		mention.IDType = strings.TrimSpace(mention.IDType)
+		mention.DisplayName = strings.TrimSpace(mention.DisplayName)
+		if mention.ID == "" {
+			continue
+		}
+		key := mention.IDType + "\x00" + mention.ID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, mention)
+	}
+	return out
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (r *AccountRunner) EnsureKnownSessions(ctx context.Context) error {
@@ -350,7 +419,7 @@ func (r *AccountRunner) EnsureKnownSessions(ctx context.Context) error {
 	}
 	if changed {
 		r.mu.Lock()
-		err := r.store.SaveAccount(r.account)
+		err := r.store.SaveAccount(ctx, r.account)
 		r.mu.Unlock()
 		return err
 	}
@@ -449,7 +518,7 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 	if event.EventType != "message" {
 		if event.EventUUID != "" && sessionUUID != "" {
 			r.account.StreamCursors[sessionUUID] = event.EventUUID
-			err := r.store.SaveAccount(r.account)
+			err := r.store.SaveAccount(ctx, r.account)
 			r.mu.Unlock()
 			return err
 		}
@@ -459,7 +528,7 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 	if payload.SenderID != r.options.AgentParticipantID {
 		if event.EventUUID != "" && sessionUUID != "" {
 			r.account.StreamCursors[sessionUUID] = event.EventUUID
-			err := r.store.SaveAccount(r.account)
+			err := r.store.SaveAccount(ctx, r.account)
 			r.mu.Unlock()
 			return err
 		}
@@ -477,7 +546,7 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 		if _, ok := r.account.SentBeakMessages[messageUUID]; ok {
 			if event.EventUUID != "" && sessionUUID != "" {
 				r.account.StreamCursors[sessionUUID] = event.EventUUID
-				err := r.store.SaveAccount(r.account)
+				err := r.store.SaveAccount(ctx, r.account)
 				r.mu.Unlock()
 				return err
 			}
@@ -490,7 +559,7 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 
 	content := strings.TrimSpace(payload.Content)
 	if content == "" {
-		return r.advanceCursor(sessionUUID, event.EventUUID)
+		return r.advanceCursor(ctx, sessionUUID, event.EventUUID)
 	}
 	if contextToken == "" {
 		r.logger.Printf("skip beak message account=%s peer=%s message=%s: missing context_token", r.account.AccountID, peerID, messageUUID)
@@ -501,20 +570,20 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 		if event.EventUUID != "" && sessionUUID != "" {
 			r.account.StreamCursors[sessionUUID] = event.EventUUID
 		}
-		err := r.store.SaveAccount(r.account)
+		err := r.store.SaveAccount(ctx, r.account)
 		r.mu.Unlock()
 		return err
 	}
 	replyToUserID := weixin.ChatIdentityFromStateKey(peerID).ReplyToUserID
 	if err := r.wx.SendText(ctx, replyToUserID, content, contextToken); err != nil {
 		if errors.Is(err, weixin.ErrSessionExpired) {
-			_ = r.markSessionExpired("sendmessage session expired")
+			_ = r.markSessionExpired(ctx, "sendmessage session expired")
 		}
 		return err
 	}
 	if err := r.sendTyping(ctx, peerID, weixin.TypingStatusStop); err != nil {
 		if errors.Is(err, weixin.ErrSessionExpired) {
-			_ = r.markSessionExpired("typing session expired")
+			_ = r.markSessionExpired(ctx, "typing session expired")
 			return err
 		}
 		r.logger.Printf("send typing stop account=%s peer=%s error=%v", r.account.AccountID, peerID, err)
@@ -527,18 +596,18 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 	if event.EventUUID != "" && sessionUUID != "" {
 		r.account.StreamCursors[sessionUUID] = event.EventUUID
 	}
-	err = r.store.SaveAccount(r.account)
+	err = r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	return err
 }
 
-func (r *AccountRunner) advanceCursor(sessionUUID, eventUUID string) error {
+func (r *AccountRunner) advanceCursor(ctx context.Context, sessionUUID, eventUUID string) error {
 	if sessionUUID == "" || eventUUID == "" {
 		return nil
 	}
 	r.mu.Lock()
 	r.account.StreamCursors[sessionUUID] = eventUUID
-	err := r.store.SaveAccount(r.account)
+	err := r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	return err
 }
@@ -568,7 +637,7 @@ func (r *AccountRunner) sendTyping(ctx context.Context, peerID string, status in
 		typingTicket = ticket
 		r.mu.Lock()
 		r.account.TypingTickets[peerID] = typingTicket
-		err = r.store.SaveAccount(r.account)
+		err = r.store.SaveAccount(ctx, r.account)
 		r.mu.Unlock()
 		if err != nil {
 			return err
@@ -586,7 +655,7 @@ func (r *AccountRunner) sendTyping(ctx context.Context, peerID string, status in
 	}
 	r.mu.Lock()
 	r.account.TypingTickets[peerID] = ticket
-	saveErr := r.store.SaveAccount(r.account)
+	saveErr := r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	if saveErr != nil {
 		return saveErr
@@ -594,10 +663,10 @@ func (r *AccountRunner) sendTyping(ctx context.Context, peerID string, status in
 	return r.wx.SendTyping(ctx, chat.ReplyToUserID, ticket, status)
 }
 
-func (r *AccountRunner) markSessionExpired(reason string) error {
+func (r *AccountRunner) markSessionExpired(ctx context.Context, reason string) error {
 	r.mu.Lock()
 	r.account.MarkLoginRequired(reason)
-	err := r.store.SaveAccount(r.account)
+	err := r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	return err
 }

@@ -76,6 +76,22 @@ type WeixinMessage struct {
 	MessageState int           `json:"message_state,omitempty"`
 	ItemList     []MessageItem `json:"item_list,omitempty"`
 	ContextToken string        `json:"context_token,omitempty"`
+	Mentions     []Mention     `json:"mentions,omitempty"`
+	MentionedMe  bool          `json:"mentioned_me,omitempty"`
+	IsInAtList   bool          `json:"is_in_at_list,omitempty"`
+	MentionAll   bool          `json:"mention_all,omitempty"`
+	IsAtAll      bool          `json:"is_at_all,omitempty"`
+}
+
+type Mention struct {
+	ID          string `json:"id,omitempty"`
+	IDType      string `json:"id_type,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Name        string `json:"name,omitempty"`
+	UserID      string `json:"user_id,omitempty"`
+	OpenID      string `json:"open_id,omitempty"`
+	UnionID     string `json:"union_id,omitempty"`
+	Mobile      string `json:"mobile,omitempty"`
 }
 
 type ChatIdentity struct {

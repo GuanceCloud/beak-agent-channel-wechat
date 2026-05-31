@@ -4,7 +4,7 @@
 
 这是一个 Go SDK 包，用于把 Beak Channel Gateway 接入微信 bot account，并通过 Tencent iLink Weixin APIs 完成扫码登录、消息接收和消息发送。
 
-本仓库提供的是可被 Beak host `import` 的库代码，不是命令行工具。SDK 不读取用户编写的运行时配置文件，不维护本地状态目录，不拥有数据库持久化，也不要求用户登录服务器修改文件。Beak host 负责客户端 UI、credential 持久化、account state 持久化、session 创建、message 写入、agent stream 订阅和 connector runtime 打包。SDK 只负责微信 connector 逻辑：二维码登录、轮询收消息、文本发送、typing 状态、消息去重、stream cursor 处理，以及把微信消息标准化为 Beak Gateway 能理解的消息。
+本仓库提供的是可被 Beak host `import` 的库代码，不是命令行工具。SDK 不读取用户编写的运行时配置文件，不维护本地状态目录，不拥有数据库持久化，也不要求用户登录服务器修改文件。Beak host 负责客户端 UI、credential 持久化、account state 持久化、session 创建、message 写入、agent 出站消息订阅和 connector runtime 打包。SDK 只负责微信 connector 逻辑：二维码登录、iLink update 轮询、文本发送、typing 状态、消息去重、`context_token` 处理，以及把微信消息标准化为 Beak Gateway 能理解的消息。
 
 ## 范围
 
@@ -13,8 +13,8 @@ v1 支持：
 - 通过 `beakweixin.NewConnector()` 暴露通用 `sdk.Connector` 实现。
 - 通过 Tencent iLink 完成微信 bot account 二维码登录。
 - 由 Beak host 保存 credential 和 connector state。
-- 微信文本消息入站到 Beak session。
-- Beak agent 文本输出回发到微信。
+- `ilink/bot/getupdates` 中的微信文本消息入站到 Beak session。
+- Beak agent 文本输出通过 `connector.Send` / `ilink/bot/sendmessage` 回发到微信。
 - 通过 `getconfig` 和 `sendtyping` 发送微信 typing 状态。
 - 单聊和显式群聊标准化。
 - 一个已连接 bot account 中的一个群聊对应一个 Beak session。
@@ -28,6 +28,14 @@ v1 不支持：
 - CDN/AES 媒体上传下载。
 - 把微信 connector 做成 CLI。
 - 让 SDK 维护本地配置文件或本地状态目录。
+
+## OpenClaw 参考实现对齐
+
+上游 [`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) 在 `gateway.startAccount` 中启动 `monitorWeixinProvider`。该 monitor 长轮询 `ilink/bot/getupdates`，保存 `get_updates_buf`，提取每条消息的 `context_token`，并通过 `ilink/bot/sendmessage` 发送文本。
+
+微信参考实现没有 Beak-facing 入站 webhook。旧日志里出现的 "webhook" 只是 polling monitor 的日志文案，不代表 HTTP callback 契约。
+
+Go SDK 保留了旧 bridge/runtime 兼容代码和 stream cursor 字段。新的 Beak Channel Gateway 接入应把平台入站理解为 Weixin polling，把平台出站理解为 host dispatch 后调用 `connector.Send`。
 
 ## 包结构
 
@@ -53,7 +61,7 @@ func WeixinConnector() sdk.Connector {
 
 本包提供两个 Go 入口：
 
-- `beakweixin.NewConnector()`：返回通用 Connector SDK 实现。
+- `beakweixin.NewConnector()`：返回通用 `sdk.Connector` 实现。
 - `beakweixin.New().Channel()`：返回旧版 channel adapter，用于兼容已有 Beak channel 接入。
 
 新的 Beak Channel Gateway 应使用 `NewConnector()`。
@@ -109,11 +117,12 @@ type Gateway interface {
 
 ```go
 type AccountStore interface {
+	LoadChannelAccountState(ctx context.Context, accountUUID string) (map[string]any, error)
 	SaveChannelAccountState(ctx context.Context, accountUUID string, state map[string]any) error
 }
 ```
 
-Beak host 负责从数据库加载 `sdk.ChannelAccount`，在进程内解密 credential JSON 后传给 connector，并在 connector 更新 cursor、dedupe、context token 等运行态时保存新的 `state`。
+Beak host 负责从数据库加载 `sdk.ChannelAccount`，在进程内解密 credential JSON 后传给 connector，并实现 `AccountStore`，让 connector 能读取最新 state 并保存 cursor、dedupe、token、context token 等运行态。
 
 ## 云端二维码登录
 
@@ -299,21 +308,17 @@ bridge:weixin
 6. Connector 在 Beak agent 处理期间按需发送微信 typing 状态。
 7. Gateway 确保存在 `weixin:<account_uuid>:<chat_type>:<chat_id>` 对应的 Beak session。
 8. Gateway 写入 Beak message，sender 为 `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`。
-9. Gateway 或 bridge 消费同一个 session 的 Beak agent stream。
 
 Beak agent 文本出站：
 
-1. Gateway 读取该 session 的 Beak stream events。
-2. 忽略 heartbeat event。
-3. error event 返回给 reconnect loop。
-4. 只有来自 `AgentParticipantID()` 的 message event 才可以投递。
-5. Connector 按 Beak message/event id 去重。
-6. Connector 调用 `ilink/bot/sendmessage`，并带上 chat id 和缓存的 `context_token`。
-7. Connector 发送前会把超长文本切成兼容微信的多条消息。
-8. 如果启用了 typing，Connector 在成功投递后发送 typing stop。
-9. Connector 在成功发送或确认跳过后保存 `last_event_uuid`。
+1. Beak host 订阅该 session 的 agent 消息。
+2. Beak host 用 host-owned outbound state 跳过非 agent、heartbeat 和已投递消息。
+3. Beak host 调用 `connector.Send(ctx, runtime, outbound)`。
+4. Connector 调用 `ilink/bot/sendmessage`，并带上 chat id 和缓存的 `context_token`。
+5. Connector 发送前会把超长文本切成兼容微信的多条消息。
+6. 如果启用了 typing，Connector 在成功投递后发送 typing stop。
 
-Bridge 会带着最后保存的 event cursor 进行 backoff reconnect。这样即使当前 stream 只在连接时返回已有 events 加 heartbeat，connector 也能继续工作。
+旧 bridge adapter 仍可直接消费 Beak stream events，并在该模式下维护 `stream_cursors` / `sent_beak_messages`。新的 host 接入应把出站归属放在 Beak host，然后调用 `connector.Send`。
 
 ## 微信协议
 

@@ -33,9 +33,9 @@ type AccountConfig struct {
 }
 
 type StateStore interface {
-	LoadAccount(accountID string) (*AccountState, error)
-	SaveAccount(account *AccountState) error
-	SaveLogin(accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error)
+	LoadAccount(ctx context.Context, accountID string) (*AccountState, error)
+	SaveAccount(ctx context.Context, account *AccountState) error
+	SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error)
 }
 
 type BeakRuntime interface {
@@ -273,7 +273,7 @@ func (c *Client) PollLogin(ctx context.Context, qrcode string) (*LoginStatus, er
 		if status.BotToken == "" || status.ILinkBotID == "" {
 			return nil, fmt.Errorf("confirmed login response missing bot_token or ilink_bot_id")
 		}
-		account, err := c.store.SaveLogin(status.ILinkBotID, status.BotToken, status.EffectiveBaseURL(wxCfg.BaseURL), status.ILinkUserID)
+		account, err := c.store.SaveLogin(ctx, status.ILinkBotID, status.BotToken, status.EffectiveBaseURL(wxCfg.BaseURL), status.ILinkUserID)
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +304,7 @@ func (c *Client) Doctor(ctx context.Context, opts DoctorOptions) (*DoctorReport,
 	}
 	wxCfg := c.weixinRuntimeConfig()
 	for _, accountCfg := range c.options.Accounts {
-		account, err := c.store.LoadAccount(accountCfg.AccountID)
+		account, err := c.store.LoadAccount(ctx, accountCfg.AccountID)
 		if err != nil {
 			return report, err
 		}
@@ -340,7 +340,7 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func (c *Client) SendText(ctx context.Context, req SendTextRequest) (*SendTextResult, error) {
-	accountID, account, err := c.resolveOutboundAccount(req.AccountID, req.ToUserID)
+	accountID, account, err := c.resolveOutboundAccount(ctx, req.AccountID, req.ToUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -370,10 +370,10 @@ func Run(ctx context.Context, options Options, opts ...Option) error {
 	return client.Run(ctx)
 }
 
-func (c *Client) resolveOutboundAccount(accountID, toUserID string) (string, *AccountState, error) {
+func (c *Client) resolveOutboundAccount(ctx context.Context, accountID, toUserID string) (string, *AccountState, error) {
 	accountID = strings.TrimSpace(accountID)
 	if accountID != "" {
-		account, err := c.store.LoadAccount(accountID)
+		account, err := c.store.LoadAccount(ctx, accountID)
 		if err != nil {
 			return "", nil, err
 		}
@@ -381,7 +381,7 @@ func (c *Client) resolveOutboundAccount(accountID, toUserID string) (string, *Ac
 	}
 	if len(c.options.Accounts) == 1 {
 		accountID = c.options.Accounts[0].AccountID
-		account, err := c.store.LoadAccount(accountID)
+		account, err := c.store.LoadAccount(ctx, accountID)
 		if err != nil {
 			return "", nil, err
 		}
@@ -389,7 +389,7 @@ func (c *Client) resolveOutboundAccount(accountID, toUserID string) (string, *Ac
 	}
 	var matched []string
 	for _, candidate := range c.options.Accounts {
-		account, err := c.store.LoadAccount(candidate.AccountID)
+		account, err := c.store.LoadAccount(ctx, candidate.AccountID)
 		if err != nil {
 			return "", nil, err
 		}
@@ -399,7 +399,7 @@ func (c *Client) resolveOutboundAccount(accountID, toUserID string) (string, *Ac
 	}
 	switch len(matched) {
 	case 1:
-		account, err := c.store.LoadAccount(matched[0])
+		account, err := c.store.LoadAccount(ctx, matched[0])
 		if err != nil {
 			return "", nil, err
 		}

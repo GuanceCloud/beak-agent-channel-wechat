@@ -125,12 +125,12 @@ func TestChannelSendTextUsesStoredAccountAndContextToken(t *testing.T) {
 	defer server.Close()
 
 	store := newMemoryStore()
-	account, err := store.SaveLogin("account-1", "token-1", server.URL, "ilink-user-1")
+	account, err := store.SaveLogin(context.Background(), "account-1", "token-1", server.URL, "ilink-user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	account.ContextTokens["peer-1"] = "ctx-1"
-	if err := store.SaveAccount(account); err != nil {
+	if err := store.SaveAccount(context.Background(), account); err != nil {
 		t.Fatal(err)
 	}
 	client, err := New(Options{
@@ -162,7 +162,7 @@ func newMemoryStore() *memoryStore {
 	return &memoryStore{accounts: make(map[string]*AccountState)}
 }
 
-func (s *memoryStore) LoadAccount(accountID string) (*AccountState, error) {
+func (s *memoryStore) LoadAccount(ctx context.Context, accountID string) (*AccountState, error) {
 	if account, ok := s.accounts[accountID]; ok {
 		return account, nil
 	}
@@ -172,7 +172,7 @@ func (s *memoryStore) LoadAccount(accountID string) (*AccountState, error) {
 	return account, nil
 }
 
-func (s *memoryStore) SaveAccount(account *AccountState) error {
+func (s *memoryStore) SaveAccount(ctx context.Context, account *AccountState) error {
 	if account == nil || account.AccountID == "" {
 		return fmt.Errorf("account_id is required")
 	}
@@ -182,8 +182,8 @@ func (s *memoryStore) SaveAccount(account *AccountState) error {
 	return nil
 }
 
-func (s *memoryStore) SaveLogin(accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error) {
-	account, err := s.LoadAccount(accountID)
+func (s *memoryStore) SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error) {
+	account, err := s.LoadAccount(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +191,7 @@ func (s *memoryStore) SaveLogin(accountID, botToken, baseURL, ilinkUserID string
 	account.BaseURL = baseURL
 	account.ILinkUserID = ilinkUserID
 	account.MarkActive()
-	if err := s.SaveAccount(account); err != nil {
+	if err := s.SaveAccount(ctx, account); err != nil {
 		return nil, err
 	}
 	return account, nil
