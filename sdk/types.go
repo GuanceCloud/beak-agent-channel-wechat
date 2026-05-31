@@ -86,6 +86,7 @@ type Gateway interface {
 }
 
 type AccountStore interface {
+	LoadChannelAccountState(ctx context.Context, accountUUID string) (map[string]any, error)
 	SaveChannelAccountState(ctx context.Context, accountUUID string, state map[string]any) error
 }
 
@@ -154,6 +155,7 @@ type InboundMessage struct {
 	DedupeKey     string            `json:"dedupe_key,omitempty"`
 	Mentions      []MentionIdentity `json:"mentions,omitempty"`
 	MentionedMe   bool              `json:"mentioned_me,omitempty"`
+	MentionAll    bool              `json:"mention_all,omitempty"`
 	Raw           map[string]any    `json:"raw,omitempty"`
 }
 
@@ -164,16 +166,18 @@ type MentionIdentity struct {
 }
 
 type OutboundMessage struct {
-	WorkspaceUUID string         `json:"workspace_uuid"`
-	Platform      string         `json:"platform"`
-	AccountUUID   string         `json:"account_uuid"`
-	ChannelUUID   string         `json:"channel_uuid"`
-	SessionUUID   string         `json:"session_uuid"`
-	MessageUUID   string         `json:"message_uuid"`
-	ChatType      string         `json:"chat_type"`
-	ChatID        string         `json:"chat_id"`
-	Text          string         `json:"text"`
-	Raw           map[string]any `json:"raw,omitempty"`
+	WorkspaceUUID string            `json:"workspace_uuid"`
+	Platform      string            `json:"platform"`
+	AccountUUID   string            `json:"account_uuid"`
+	ChannelUUID   string            `json:"channel_uuid"`
+	SessionUUID   string            `json:"session_uuid"`
+	MessageUUID   string            `json:"message_uuid"`
+	ChatType      string            `json:"chat_type"`
+	ChatID        string            `json:"chat_id"`
+	Text          string            `json:"text"`
+	Mentions      []MentionIdentity `json:"mentions,omitempty"`
+	MentionAll    bool              `json:"mention_all,omitempty"`
+	Raw           map[string]any    `json:"raw,omitempty"`
 }
 
 type SendResult struct {

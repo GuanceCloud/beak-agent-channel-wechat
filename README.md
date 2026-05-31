@@ -4,15 +4,15 @@
 
 Go SDK package for connecting Beak Channel Gateway to Weixin bot accounts through Tencent iLink Weixin APIs.
 
-This repository is importable library code. It is not a CLI, does not read user-authored runtime files, does not own persistence, and does not require users to edit server files. The Beak host owns UI, credential persistence, account state persistence, session creation, message writes, stream subscription, and runtime packaging. This SDK owns the Weixin connector logic: QR login, polling, text send, typing status, message dedupe, stream cursor handling, and Weixin-to-Beak message normalization.
+This repository is importable library code. It is not a CLI, does not read user-authored runtime files, does not own persistence, and does not require users to edit server files. The Beak host owns UI, credential persistence, account state persistence, session creation, message writes, outbound agent-message subscription, and runtime packaging. This SDK owns the Weixin connector logic: QR login, iLink update polling, text send, typing status, message dedupe, `context_token` handling, and Weixin-to-Beak message normalization.
 
 ## Scope
 
 - Generic `sdk.Connector` implementation exposed by `beakweixin.NewConnector()`.
 - Tencent iLink QR login for Weixin bot accounts.
 - Host-backed credential and state persistence.
-- Text-only inbound Weixin messages to Beak sessions.
-- Text-only Beak agent stream output back to Weixin.
+- Text-only inbound Weixin messages from `ilink/bot/getupdates` to Beak sessions.
+- Text-only Beak agent output back to Weixin through `connector.Send` / `ilink/bot/sendmessage`.
 - Weixin typing status through `getconfig` and `sendtyping`.
 - Direct chat and explicit group chat normalization.
 - One connected bot account plus one group chat maps to one Beak session; one connected bot account plus one direct chat maps to one Beak session.
@@ -20,6 +20,14 @@ This repository is importable library code. It is not a CLI, does not read user-
 - The bot account connection is stored as `channel_accounts`; starting it does not create a task or an extra link session.
 
 Out of v1 scope for this Weixin SDK: media, voice, and CDN/AES media upload/download.
+
+## OpenClaw Reference Alignment
+
+The upstream [`Tencent/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) implementation starts `monitorWeixinProvider` from `gateway.startAccount`. That monitor long-polls `ilink/bot/getupdates`, persists `get_updates_buf`, extracts each message's `context_token`, and sends text through `ilink/bot/sendmessage`.
+
+There is no Beak-facing inbound webhook in the Weixin reference flow. Any "webhook" wording in old logs is just a log label around the polling monitor, not an HTTP callback contract.
+
+The Go SDK keeps older bridge/runtime helpers for compatibility, including stream cursor fields. New Beak Channel Gateway integrations should treat platform inbound as Weixin polling and platform outbound as host dispatch through `connector.Send`.
 
 ## Package Layout
 
@@ -45,7 +53,7 @@ func WeixinConnector() sdk.Connector {
 
 The package exposes two Go entrypoints:
 
-- `beakweixin.NewConnector()` returns the generic Connector SDK implementation.
+- `beakweixin.NewConnector()` returns the generic `sdk.Connector` implementation.
 - `beakweixin.New().Channel()` returns the older channel adapter for compatibility with existing Beak channel integrations.
 
 New Beak Channel Gateway work should use `NewConnector()`.
@@ -101,11 +109,12 @@ type Gateway interface {
 
 ```go
 type AccountStore interface {
+	LoadChannelAccountState(ctx context.Context, accountUUID string) (map[string]any, error)
 	SaveChannelAccountState(ctx context.Context, accountUUID string, state map[string]any) error
 }
 ```
 
-Beak host is responsible for loading `sdk.ChannelAccount` records from its database, decrypting credential JSON before passing accounts into the runtime, and saving updated `state` maps when the connector reports cursor or dedupe changes.
+Beak host is responsible for loading `sdk.ChannelAccount` records from its database, decrypting credential JSON before passing accounts into the runtime, and implementing `AccountStore` so connectors can read the latest state and save updated cursor, dedupe, token, and context-token maps.
 
 ## Cloud QR Login
 
@@ -289,21 +298,17 @@ Inbound Weixin text:
 6. Connector optionally sends Weixin typing status while the Beak agent is processing.
 7. Gateway ensures one Beak session for `weixin:<account_uuid>:<chat_type>:<chat_id>`.
 8. Gateway writes Beak message as sender `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`.
-9. Gateway/bridge consumes Beak agent stream for the same session.
 
 Outbound Beak agent text:
 
-1. Gateway reads Beak stream events for the session.
-2. Heartbeat events are ignored.
-3. Error events are returned to the reconnect loop.
-4. Only message events from `AgentParticipantID()` are eligible for delivery.
-5. Connector dedupes by Beak message/event id.
-6. Connector calls `ilink/bot/sendmessage` with chat id and cached `context_token`.
-7. Connector splits long text into compatible chunks before sending.
-8. Connector sends typing stop after successful delivery when typing was enabled.
-9. Connector persists `last_event_uuid` after successful send or intentional skip.
+1. Beak host subscribes to agent messages for the session.
+2. Beak host ignores non-agent, heartbeat, and already-sent messages with host-owned outbound state.
+3. Beak host calls `connector.Send(ctx, runtime, outbound)`.
+4. Connector calls `ilink/bot/sendmessage` with chat id and cached `context_token`.
+5. Connector splits long text into compatible chunks before sending.
+6. Connector sends typing stop after successful delivery when typing was enabled.
 
-The bridge reconnects with backoff and the last saved event cursor. This supports stream implementations that emit existing events plus heartbeat on connect.
+The legacy bridge adapter can still consume Beak stream events directly and stores `stream_cursors` / `sent_beak_messages` for that mode. New host integrations should keep outbound ownership in Beak host and use `connector.Send`.
 
 ## Weixin Protocol
 

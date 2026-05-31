@@ -16,7 +16,7 @@ type Connector struct {
 	channel Channel
 }
 
-func NewConnector() Connector {
+func NewConnector() sdk.Connector {
 	return Connector{channel: Channel{}}
 }
 
@@ -128,11 +128,15 @@ func (c Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbou
 	if contextKey == "" {
 		contextKey = toUserID
 	}
+	accountState, err := store.LoadAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
 	result, err := c.channel.SendText(ctx, native, SendTextRequest{
 		AccountID:    accountID,
 		ToUserID:     toUserID,
-		Text:         req.Text,
-		ContextToken: sdkAccountToState(account).ContextTokens[contextKey],
+		Text:         weixinOutboundMentionText(req),
+		ContextToken: accountState.ContextTokens[contextKey],
 	})
 	if err != nil {
 		return nil, err
@@ -313,19 +317,60 @@ func (s *connectorStateStore) seed(account sdk.ChannelAccount) {
 	s.sdkAccounts[accountID] = account
 }
 
-func (s *connectorStateStore) LoadAccount(accountID string) (*AccountState, error) {
+func (s *connectorStateStore) LoadAccount(ctx context.Context, accountID string) (*AccountState, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if account, ok := s.accounts[accountID]; ok {
+		sdkAccount := s.sdkAccounts[accountID]
+		accountStore := s.accountStore
+		s.mu.Unlock()
+		if refreshed, ok, err := loadAccountState(ctx, accountStore, sdkAccount); err != nil {
+			return nil, err
+		} else if ok {
+			s.mu.Lock()
+			s.accounts[accountID] = refreshed
+			sdkAccount.State = stateToMap(*refreshed)
+			s.sdkAccounts[accountID] = sdkAccount
+			s.mu.Unlock()
+			return refreshed, nil
+		}
 		return account, nil
+	}
+	accountStore := s.accountStore
+	s.mu.Unlock()
+	if refreshed, ok, err := loadAccountState(ctx, accountStore, sdk.ChannelAccount{UUID: accountID}); err != nil {
+		return nil, err
+	} else if ok {
+		s.mu.Lock()
+		s.accounts[accountID] = refreshed
+		s.sdkAccounts[accountID] = accountStateToSDK(*refreshed, sdk.ChannelAccount{UUID: accountID})
+		s.mu.Unlock()
+		return refreshed, nil
 	}
 	account := &AccountState{AccountID: accountID}
 	account.EnsureMaps()
+	s.mu.Lock()
 	s.accounts[accountID] = account
+	s.mu.Unlock()
 	return account, nil
 }
 
-func (s *connectorStateStore) SaveAccount(account *AccountState) error {
+func loadAccountState(ctx context.Context, accountStore sdk.AccountStore, account sdk.ChannelAccount) (*AccountState, bool, error) {
+	if accountStore == nil || strings.TrimSpace(account.UUID) == "" {
+		return nil, false, nil
+	}
+	stateMap, err := accountStore.LoadChannelAccountState(ctx, account.UUID)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(stateMap) == 0 {
+		return nil, false, nil
+	}
+	account.State = stateMap
+	refreshed := sdkAccountToState(account)
+	return &refreshed, true, nil
+}
+
+func (s *connectorStateStore) SaveAccount(ctx context.Context, account *AccountState) error {
 	if account == nil || account.AccountID == "" {
 		return fmt.Errorf("account_id is required")
 	}
@@ -339,13 +384,13 @@ func (s *connectorStateStore) SaveAccount(account *AccountState) error {
 	accountStore := s.accountStore
 	s.mu.Unlock()
 	if accountStore != nil && sdkAccount.UUID != "" {
-		return accountStore.SaveChannelAccountState(context.Background(), sdkAccount.UUID, sdkAccount.State)
+		return accountStore.SaveChannelAccountState(ctx, sdkAccount.UUID, sdkAccount.State)
 	}
 	return nil
 }
 
-func (s *connectorStateStore) SaveLogin(accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error) {
-	account, err := s.LoadAccount(accountID)
+func (s *connectorStateStore) SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error) {
+	account, err := s.LoadAccount(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +398,7 @@ func (s *connectorStateStore) SaveLogin(accountID, botToken, baseURL, ilinkUserI
 	account.BaseURL = baseURL
 	account.ILinkUserID = ilinkUserID
 	account.MarkActive()
-	if err := s.SaveAccount(account); err != nil {
+	if err := s.SaveAccount(ctx, account); err != nil {
 		return nil, err
 	}
 	return account, nil
@@ -445,6 +490,104 @@ func outboundStateKey(req sdk.OutboundMessage) string {
 		return weixin.ChatTypeGroup + ":" + req.ChatID
 	}
 	return req.ChatID
+}
+
+func weixinOutboundMentionText(req sdk.OutboundMessage) string {
+	text := strings.TrimSpace(req.Text)
+	var tags []string
+	if req.MentionAll || boolValue(req.Raw["mention_all"]) || boolValue(req.Raw["mentionAll"]) ||
+		boolValue(req.Raw["at_all"]) || boolValue(req.Raw["atAll"]) || boolValue(req.Raw["isAtAll"]) {
+		tags = append(tags, "@all")
+	}
+	for _, id := range stringSlice(firstValue(req.Raw["mention_ids"], req.Raw["mentionIds"], req.Raw["at_user_ids"], req.Raw["atUserIds"])) {
+		tags = append(tags, "@"+id)
+	}
+	mentions := append([]sdk.MentionIdentity{}, req.Mentions...)
+	mentions = append(mentions, rawMentionIdentities(req.Raw["mentions"])...)
+	for _, mention := range mentions {
+		id := strings.TrimSpace(mention.ID)
+		if id == "" {
+			continue
+		}
+		if strings.EqualFold(id, "all") || strings.EqualFold(strings.TrimSpace(mention.IDType), "all") {
+			tags = append(tags, "@all")
+			continue
+		}
+		label := strings.TrimSpace(mention.DisplayName)
+		if label == "" {
+			label = id
+		}
+		if !strings.HasPrefix(label, "@") {
+			label = "@" + label
+		}
+		tags = append(tags, label)
+	}
+	tags = uniqueStringList(tags)
+	if len(tags) == 0 {
+		return text
+	}
+	prefix := strings.Join(tags, " ")
+	if text == "" {
+		return prefix
+	}
+	return prefix + "\n" + text
+}
+
+func rawMentionIdentities(value any) []sdk.MentionIdentity {
+	switch typed := value.(type) {
+	case []sdk.MentionIdentity:
+		return typed
+	case []any:
+		out := make([]sdk.MentionIdentity, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, mentionIdentityFromAny(item))
+		}
+		return out
+	case []map[string]any:
+		out := make([]sdk.MentionIdentity, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, mentionIdentityFromAny(item))
+		}
+		return out
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return nil
+		}
+		var parsed []map[string]any
+		if err := json.Unmarshal([]byte(typed), &parsed); err == nil {
+			out := make([]sdk.MentionIdentity, 0, len(parsed))
+			for _, item := range parsed {
+				out = append(out, mentionIdentityFromAny(item))
+			}
+			return out
+		}
+	case json.RawMessage:
+		var parsed []map[string]any
+		if err := json.Unmarshal(typed, &parsed); err == nil {
+			out := make([]sdk.MentionIdentity, 0, len(parsed))
+			for _, item := range parsed {
+				out = append(out, mentionIdentityFromAny(item))
+			}
+			return out
+		}
+	}
+	return nil
+}
+
+func mentionIdentityFromAny(value any) sdk.MentionIdentity {
+	mention, ok := value.(sdk.MentionIdentity)
+	if ok {
+		return mention
+	}
+	item, ok := value.(map[string]any)
+	if !ok {
+		return sdk.MentionIdentity{}
+	}
+	return sdk.MentionIdentity{
+		ID:          firstString(item["id"], item["ID"], item["user_id"], item["userId"]),
+		IDType:      firstString(item["id_type"], item["idType"], item["IDType"], item["type"]),
+		DisplayName: firstString(item["display_name"], item["displayName"], item["name"]),
+	}
 }
 
 func (a gatewayRuntimeAdapter) EnsureWeixinChatSession(ctx context.Context, accountID, chatType, chatID, senderID string) (string, error) {
@@ -562,6 +705,61 @@ func stringMap(value any) map[string]string {
 	return out
 }
 
+func stringSlice(value any) []string {
+	var values []any
+	switch typed := value.(type) {
+	case []string:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if item = strings.TrimSpace(item); item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []any:
+		values = typed
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return nil
+		}
+		var parsed []any
+		if err := json.Unmarshal([]byte(typed), &parsed); err == nil {
+			values = parsed
+			break
+		}
+		return []string{strings.TrimSpace(typed)}
+	case json.RawMessage:
+		var parsed []any
+		if err := json.Unmarshal(typed, &parsed); err == nil {
+			values = parsed
+		}
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if item := strings.TrimSpace(stringValue(value)); item != "" {
+			out = append(out, item)
+		}
+	}
+	return uniqueStringList(out)
+}
+
+func uniqueStringList(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func stringValue(value any) string {
 	if value == nil {
 		return ""
@@ -574,6 +772,17 @@ func stringValue(value any) string {
 	}
 }
 
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+
 func firstString(values ...any) string {
 	for _, value := range values {
 		if stringValue := strings.TrimSpace(stringValue(value)); stringValue != "" {
@@ -581,6 +790,15 @@ func firstString(values ...any) string {
 		}
 	}
 	return ""
+}
+
+func firstValue(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 var _ sdk.Connector = Connector{}
