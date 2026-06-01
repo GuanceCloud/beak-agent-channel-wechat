@@ -709,6 +709,45 @@ func TestWeixinConnectorSendUsesRequestedAccount(t *testing.T) {
 	}
 }
 
+func TestWeixinConnectorSendMarkdownFallsBackToText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/sendmessage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var body struct {
+			Message struct {
+				ItemList []struct {
+					TextItem struct {
+						Text string `json:"text"`
+					} `json:"text_item"`
+				} `json:"item_list"`
+			} `json:"msg"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Message.ItemList) != 1 || body.Message.ItemList[0].TextItem.Text != "# 日志查询\n- 错误日志" {
+			t.Fatalf("items=%+v", body.Message.ItemList)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+	}))
+	defer server.Close()
+
+	_, err := NewConnector().Send(context.Background(), sdk.Runtime{
+		Account: sdkAccount("account-1", "token-1", server.URL, map[string]string{"group:group-1": "ctx-1"}),
+	}, sdk.OutboundMessage{
+		AccountUUID: "account-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "group-1",
+		Text:        "# 日志查询\n- 错误日志",
+		Format:      "markdown",
+		Title:       "日志查询",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWeixinConnectorSendRawMentions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ilink/bot/sendmessage" {

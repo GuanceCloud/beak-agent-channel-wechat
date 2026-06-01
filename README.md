@@ -12,7 +12,7 @@ This repository is importable library code. It is not a CLI, does not read user-
 - Tencent iLink QR login for Weixin bot accounts.
 - Host-backed credential and state persistence.
 - Text-only inbound Weixin messages from `ilink/bot/getupdates` to Beak sessions.
-- Text-only Beak agent output back to Weixin through `connector.Send` / `ilink/bot/sendmessage`.
+- Text or markdown-formatted Beak agent output back to Weixin through `connector.Send` / `ilink/bot/sendmessage`; markdown uses the same common fields and falls back to text inside the SDK.
 - Weixin typing status through `getconfig` and `sendtyping`.
 - Direct chat and explicit group chat normalization.
 - One connected bot account plus one group chat maps to one Beak session; one connected bot account plus one direct chat maps to one Beak session.
@@ -102,6 +102,8 @@ runtime.Native = beakweixin.Runtime{
 ```
 
 `BotAgent` is sent as iLink `base_info.bot_agent` for upstream observability. It does not change the Weixin QR scan confirmation title; Tencent iLink's public QR login API does not expose a title field.
+
+The common outbound `Format` / `Title` fields are accepted for host-side consistency. Beak host should pass them exactly as it does for Lark and DingTalk; Weixin currently falls back to plain text for `Format="markdown"` inside the SDK because the iLink text path does not expose a markdown renderer.
 
 `sdk.Gateway` is the host runtime contract:
 

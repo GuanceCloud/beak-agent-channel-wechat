@@ -1,6 +1,9 @@
 package sdk
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestIdentityHelpers(t *testing.T) {
 	if got := ChatSourceID("weixin", "account-1", ChatTypeGroup, "group-1"); got != "weixin:account-1:group:group-1" {
@@ -11,5 +14,23 @@ func TestIdentityHelpers(t *testing.T) {
 	}
 	if got := BridgeParticipantID("weixin"); got != "bridge:weixin" {
 		t.Fatalf("bridge id=%q", got)
+	}
+}
+
+func TestOutboundMessageCommonFormatContract(t *testing.T) {
+	data, err := json.Marshal(OutboundMessage{
+		Text:   "# 日志查询\n- 错误日志",
+		Format: "markdown",
+		Title:  "日志查询",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["text"] != "# 日志查询\n- 错误日志" || decoded["format"] != "markdown" || decoded["title"] != "日志查询" {
+		t.Fatalf("common outbound json=%+v", decoded)
 	}
 }
