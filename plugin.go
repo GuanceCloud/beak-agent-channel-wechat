@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/bridge"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/channel"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/state"
@@ -50,11 +51,16 @@ type Runtime struct {
 	State           StateStore
 	WorkspaceUUID   string
 	ChannelUUID     string
+	Weixin          WeixinOptions
 	Accounts        []Account
 	PollInterval    time.Duration
 	StreamReconnect time.Duration
 	HTTPClient      *http.Client
 	Logger          *log.Logger
+}
+
+type WeixinOptions struct {
+	BotAgent string
 }
 
 type Account struct {
@@ -85,6 +91,7 @@ type UserMessage struct {
 	PeerUserID string
 	SenderID   string
 	Content    string
+	DedupeKey  string
 	Metadata   map[string]any
 }
 
@@ -294,6 +301,7 @@ func (Channel) client(runtime Runtime) (*channel.Client, error) {
 		State:           runtime.State,
 		WorkspaceRef:    runtime.WorkspaceUUID,
 		ChannelUUID:     runtime.ChannelUUID,
+		Weixin:          toBridgeWeixinOptions(runtime.Weixin),
 		Accounts:        make([]channel.AccountConfig, 0, len(runtime.Accounts)),
 		PollInterval:    runtime.PollInterval,
 		StreamReconnect: runtime.StreamReconnect,
@@ -307,6 +315,10 @@ func (Channel) client(runtime Runtime) (*channel.Client, error) {
 		opts = append(opts, channel.WithLogger(runtime.Logger))
 	}
 	return channel.New(options, opts...)
+}
+
+func toBridgeWeixinOptions(options WeixinOptions) bridge.WeixinOptions {
+	return bridge.WeixinOptions{BotAgent: options.BotAgent}
 }
 
 type beakRuntimeAdapter struct {
@@ -348,6 +360,7 @@ func (a beakRuntimeAdapter) CreateWeixinUserMessage(ctx context.Context, session
 		PeerUserID: msg.PeerUserID,
 		SenderID:   msg.SenderID,
 		Content:    msg.Content,
+		DedupeKey:  msg.DedupeKey,
 		Metadata:   msg.Metadata,
 	})
 }

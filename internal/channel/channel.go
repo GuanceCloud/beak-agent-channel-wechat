@@ -22,6 +22,7 @@ type Options struct {
 	State           StateStore
 	WorkspaceRef    string
 	ChannelUUID     string
+	Weixin          bridge.WeixinOptions
 	Accounts        []AccountConfig
 	PollInterval    time.Duration
 	StreamReconnect time.Duration
@@ -58,6 +59,7 @@ type UserMessage struct {
 	PeerUserID string
 	SenderID   string
 	Content    string
+	DedupeKey  string
 	Metadata   map[string]any
 }
 
@@ -163,6 +165,7 @@ func New(options Options, opts ...Option) (*Client, error) {
 		store:   options.State,
 		beak:    options.Beak,
 		logger:  log.Default(),
+		weixin:  options.Weixin,
 		http:    options.HTTPClient,
 	}
 	for _, opt := range opts {
@@ -491,6 +494,7 @@ func (a runtimeBridgeAdapter) CreateMessage(ctx context.Context, sessionUUID str
 		PeerUserID: metadataString(req.Metadata, "weixin_peer_id"),
 		SenderID:   req.SenderID,
 		Content:    req.Content,
+		DedupeKey:  req.DedupeKey,
 		Metadata:   req.Metadata,
 	}
 	if msg.PeerUserID == "" {

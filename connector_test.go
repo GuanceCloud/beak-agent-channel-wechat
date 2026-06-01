@@ -37,6 +37,17 @@ func TestWeixinConnectorMetadataAndSchema(t *testing.T) {
 	}
 }
 
+func TestWeixinConnectorRuntimeFromSDKPreservesNativeBotAgent(t *testing.T) {
+	native, _ := Connector{}.runtimeFromSDK(sdk.Runtime{
+		WorkspaceUUID: "workspace-1",
+		Channel:       sdk.Channel{UUID: "channel-1"},
+		Native:        Runtime{Weixin: WeixinOptions{BotAgent: "Beak Agent Test"}},
+	}, nil)
+	if native.Weixin.BotAgent != "Beak Agent Test" {
+		t.Fatalf("bot_agent=%q", native.Weixin.BotAgent)
+	}
+}
+
 func TestWeixinConnectorQRCodeLoginThroughSDK(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +334,9 @@ func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
 	created := createdMessages[0]
 	if created.SessionUUID != "session-scenario-1" || created.Content != "你好 Beak" || created.SenderID != "im:weixin:direct:user-scenario-1:user:user-scenario-1" {
 		t.Fatalf("created message=%+v", created)
+	}
+	if created.DedupeKey != "account-scenario-1:message:1001" {
+		t.Fatalf("dedupe key=%q", created.DedupeKey)
 	}
 	if len(chatSessions) != 1 || chatSessions[0].AccountUUID != "account-scenario-1" || chatSessions[0].ChatType != sdk.ChatTypeDirect || chatSessions[0].ChatID != "user-scenario-1" {
 		t.Fatalf("chat sessions=%+v", chatSessions)
@@ -616,6 +630,9 @@ func TestWeixinConnectorScenarioPollingDedupesAndCachesChatContext(t *testing.T)
 	}
 	if messages[0].Content != "group hello" || messages[1].Content != "direct hello" {
 		t.Fatalf("messages=%+v", messages)
+	}
+	if messages[0].DedupeKey != "account-scenario-2:message:201" || messages[1].DedupeKey != "account-scenario-2:message:202" {
+		t.Fatalf("dedupe keys=%q %q", messages[0].DedupeKey, messages[1].DedupeKey)
 	}
 	inbound, ok := messages[0].Metadata["inbound_message"].(sdk.InboundMessage)
 	if !ok || !inbound.MentionAll || !inbound.MentionedMe || len(inbound.Mentions) != 2 {

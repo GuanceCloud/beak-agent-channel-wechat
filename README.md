@@ -91,6 +91,18 @@ runtime := sdk.Runtime{
 }
 ```
 
+Connector-specific iLink metadata can be passed through `sdk.Runtime.Native`:
+
+```go
+runtime.Native = beakweixin.Runtime{
+	Weixin: beakweixin.WeixinOptions{
+		BotAgent: "Beak Agent",
+	},
+}
+```
+
+`BotAgent` is sent as iLink `base_info.bot_agent` for upstream observability. It does not change the Weixin QR scan confirmation title; Tencent iLink's public QR login API does not expose a title field.
+
 `sdk.Gateway` is the host runtime contract:
 
 ```go
@@ -323,7 +335,7 @@ The connector uses Tencent iLink Weixin endpoints internally:
 - `ilink/bot/msg/notifystart`
 - `ilink/bot/msg/notifystop`
 
-iLink headers, bot type, app id, client version, route tag, long-poll timeout, and request timeout are internal protocol defaults. They are not user-facing Beak channel settings.
+iLink headers, bot type, app id, client version, route tag, long-poll timeout, and request timeout are internal protocol defaults. They are not user-facing Beak channel settings. `BotAgent` is the only public Weixin runtime option exposed by this SDK today.
 
 ## Example
 

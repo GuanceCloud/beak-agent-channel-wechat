@@ -81,6 +81,7 @@ type CreateMessageRequest struct {
 	WorkspaceUUID string         `json:"workspace_uuid"`
 	SenderID      string         `json:"sender_id"`
 	Content       string         `json:"content"`
+	DedupeKey     string         `json:"dedupe_key,omitempty"`
 	ReplyToUUID   string         `json:"reply_to_uuid,omitempty"`
 	Metadata      map[string]any `json:"metadata,omitempty"`
 }

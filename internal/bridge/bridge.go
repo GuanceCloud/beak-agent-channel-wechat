@@ -251,6 +251,7 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 		WorkspaceUUID: r.options.WorkspaceRef,
 		SenderID:      beak.IMUserParticipantID(beak.PlatformWeixin, chat.ChatType, chat.ChatID, chat.SenderID),
 		Content:       text,
+		DedupeKey:     key,
 		Metadata: map[string]any{
 			"source":             "weixin",
 			"platform":           "weixin",

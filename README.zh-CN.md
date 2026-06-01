@@ -99,6 +99,18 @@ runtime := sdk.Runtime{
 }
 ```
 
+如果 Beak host 需要调整 iLink 元数据，可以通过 `sdk.Runtime.Native` 传入 connector 专属运行时选项：
+
+```go
+runtime.Native = beakweixin.Runtime{
+	Weixin: beakweixin.WeixinOptions{
+		BotAgent: "Beak Agent",
+	},
+}
+```
+
+`BotAgent` 会作为 iLink `base_info.bot_agent` 发送给上游，用于可观测性标识。它不会改变微信扫码确认页的标题；Tencent iLink 公开的二维码登录 API 没有暴露标题字段。
+
 `sdk.Gateway` 是 Beak host 需要实现的运行时接口：
 
 ```go
@@ -333,7 +345,7 @@ Connector 内部使用 Tencent iLink Weixin endpoints：
 - `ilink/bot/msg/notifystart`
 - `ilink/bot/msg/notifystop`
 
-iLink headers、bot type、app id、client version、route tag、long-poll timeout 和 request timeout 都是 SDK 内部协议默认值，不是用户需要填写的 Beak channel 配置。
+iLink headers、bot type、app id、client version、route tag、long-poll timeout 和 request timeout 都是 SDK 内部协议默认值，不是用户需要填写的 Beak channel 配置。当前 SDK 只公开 `BotAgent` 这个微信运行时选项。
 
 ## 示例
 

@@ -613,6 +613,7 @@ func (a gatewayRuntimeAdapter) CreateWeixinUserMessage(ctx context.Context, sess
 		SessionUUID:   sessionUUID,
 		SenderID:      msg.SenderID,
 		Content:       msg.Content,
+		DedupeKey:     msg.DedupeKey,
 		Metadata:      msg.Metadata,
 	})
 }

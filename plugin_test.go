@@ -40,6 +40,9 @@ func TestChannelSendTextUsesInjectedAccountStore(t *testing.T) {
 			t.Fatalf("Authorization=%q", got)
 		}
 		var body struct {
+			BaseInfo struct {
+				BotAgent string `json:"bot_agent"`
+			} `json:"base_info"`
 			Message struct {
 				ToUserID     string `json:"to_user_id"`
 				ContextToken string `json:"context_token"`
@@ -52,6 +55,9 @@ func TestChannelSendTextUsesInjectedAccountStore(t *testing.T) {
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
+		}
+		if body.BaseInfo.BotAgent != "Beak Agent Test" {
+			t.Fatalf("bot_agent=%q", body.BaseInfo.BotAgent)
 		}
 		if body.Message.ToUserID != "peer-1" || body.Message.ContextToken != "ctx-1" {
 			t.Fatalf("message=%+v", body.Message)
@@ -79,6 +85,7 @@ func TestChannelSendTextUsesInjectedAccountStore(t *testing.T) {
 	}
 	result, err := Channel{}.SendText(context.Background(), Runtime{
 		State:      store,
+		Weixin:     WeixinOptions{BotAgent: "Beak Agent Test"},
 		Accounts:   []Account{{AccountID: "account-1"}},
 		HTTPClient: httpClient,
 	}, SendTextRequest{
