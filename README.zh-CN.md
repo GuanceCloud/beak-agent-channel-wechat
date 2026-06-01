@@ -14,7 +14,7 @@ v1 支持：
 - 通过 Tencent iLink 完成微信 bot account 二维码登录。
 - 由 Beak host 保存 credential 和 connector state。
 - `ilink/bot/getupdates` 中的微信文本消息入站到 Beak session。
-- Beak agent 文本输出通过 `connector.Send` / `ilink/bot/sendmessage` 回发到微信。
+- Beak agent 文本或 markdown 格式输出通过 `connector.Send` / `ilink/bot/sendmessage` 回发到微信；markdown 使用同一组通用字段，并在 SDK 内退化为 text。
 - 通过 `getconfig` 和 `sendtyping` 发送微信 typing 状态。
 - 单聊和显式群聊标准化。
 - 一个已连接 bot account 中的一个群聊对应一个 Beak session。
@@ -110,6 +110,8 @@ runtime.Native = beakweixin.Runtime{
 ```
 
 `BotAgent` 会作为 iLink `base_info.bot_agent` 发送给上游，用于可观测性标识。它不会改变微信扫码确认页的标题；Tencent iLink 公开的二维码登录 API 没有暴露标题字段。
+
+通用出站字段 `Format` / `Title` 会被接受，便于 Beak host 统一建模。Beak host 应该像飞书和钉钉一样原样传入这些字段；当前微信 iLink 文本发送路径没有暴露 markdown renderer，所以 `Format="markdown"` 会在 SDK 内退化为普通 text 发送。
 
 `sdk.Gateway` 是 Beak host 需要实现的运行时接口：
 
