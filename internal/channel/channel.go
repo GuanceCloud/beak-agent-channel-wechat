@@ -36,7 +36,7 @@ type AccountConfig struct {
 type StateStore interface {
 	LoadAccount(ctx context.Context, accountID string) (*AccountState, error)
 	SaveAccount(ctx context.Context, account *AccountState) error
-	SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error)
+	SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID, ilinkBotID string) (*AccountState, error)
 }
 
 type BeakRuntime interface {
@@ -273,10 +273,11 @@ func (c *Client) PollLogin(ctx context.Context, qrcode string) (*LoginStatus, er
 	out := &LoginStatus{Status: status.Status}
 	switch strings.ToLower(status.Status) {
 	case "confirmed":
-		if status.BotToken == "" || status.ILinkBotID == "" {
-			return nil, fmt.Errorf("confirmed login response missing bot_token or ilink_bot_id")
+		accountID := stableWeixinAccountID(status.ILinkUserID, status.ILinkBotID)
+		if status.BotToken == "" || accountID == "" {
+			return nil, fmt.Errorf("confirmed login response missing bot_token or stable account id")
 		}
-		account, err := c.store.SaveLogin(ctx, status.ILinkBotID, status.BotToken, status.EffectiveBaseURL(wxCfg.BaseURL), status.ILinkUserID)
+		account, err := c.store.SaveLogin(ctx, accountID, status.BotToken, status.EffectiveBaseURL(wxCfg.BaseURL), status.ILinkUserID, status.ILinkBotID)
 		if err != nil {
 			return nil, err
 		}
@@ -287,6 +288,14 @@ func (c *Client) PollLogin(ctx context.Context, qrcode string) (*LoginStatus, er
 		out.Expired = true
 	}
 	return out, nil
+}
+
+func stableWeixinAccountID(ilinkUserID, ilinkBotID string) string {
+	ilinkUserID = strings.TrimSpace(ilinkUserID)
+	if ilinkUserID != "" {
+		return ilinkUserID
+	}
+	return strings.TrimSpace(ilinkBotID)
 }
 
 func (c *Client) Doctor(ctx context.Context, opts DoctorOptions) (*DoctorReport, error) {

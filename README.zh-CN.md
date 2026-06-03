@@ -190,11 +190,11 @@ if status.Confirmed {
 
 微信登录成功后会返回 credential 字段：
 
-- `account_id`
+- `account_id`：SDK 归一化后的稳定账号 key。微信优先使用 `ilink_user_id`，只有缺失时才兼容回退到 `ilink_bot_id`。
 - `bot_token`
 - `base_url`
-- `ilink_user_id`
-- `ilink_bot_id`
+- `ilink_user_id`：微信 iLink 用户身份，作为账号稳定身份来源。
+- `ilink_bot_id`：微信 iLink bot 标识，可能随扫码登录变化，不要作为账号去重或绑定主键。
 
 ## 启动账号连接
 
@@ -227,11 +227,11 @@ Credential 是敏感数据，应由 Beak host 加密保存：
 
 ```json
 {
-  "account_id": "weixin-account-id",
+  "account_id": "ilink-user-id",
   "bot_token": "...",
   "base_url": "https://ilinkai.weixin.qq.com",
-  "ilink_user_id": "...",
-  "ilink_bot_id": "..."
+  "ilink_user_id": "ilink-user-id",
+  "ilink_bot_id": "ilink-bot-id"
 }
 ```
 

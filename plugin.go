@@ -81,7 +81,7 @@ type BeakRuntime interface {
 type StateStore interface {
 	LoadAccount(ctx context.Context, accountID string) (*AccountState, error)
 	SaveAccount(ctx context.Context, account *AccountState) error
-	SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error)
+	SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID, ilinkBotID string) (*AccountState, error)
 }
 
 type AccountState = state.AccountState

@@ -58,14 +58,75 @@ func TestChannelLoginStoresAccount(t *testing.T) {
 	if qrURL != "https://example.test/qr" {
 		t.Fatalf("qrURL=%q", qrURL)
 	}
-	if result.Account.AccountID != "account-1" || result.Account.BotToken != "token-1" {
+	if result.Account.AccountID != "ilink-user-1" || result.Account.BotToken != "token-1" || result.Account.ILinkBotID != "account-1" {
 		t.Fatalf("account=%+v", result.Account)
 	}
-	if result.AccountID != "account-1" {
+	if result.AccountID != "ilink-user-1" {
 		t.Fatalf("login account id=%q", result.AccountID)
 	}
 	if len(client.Accounts()) != 0 {
 		t.Fatalf("sdk must not mutate accounts, got %+v", client.Accounts())
+	}
+}
+
+func TestChannelPollLoginUsesStableWeixinUserID(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/get_qrcode_status" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		switch r.URL.Query().Get("qrcode") {
+		case "qr-first":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":        "confirmed",
+				"bot_token":     "token-first",
+				"ilink_bot_id":  "bot-scan-first",
+				"ilink_user_id": "ilink-user-stable",
+				"baseurl":       server.URL,
+			})
+		case "qr-second":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":        "confirmed",
+				"bot_token":     "token-second",
+				"ilink_bot_id":  "bot-scan-second",
+				"ilink_user_id": "ilink-user-stable",
+				"baseurl":       server.URL,
+			})
+		default:
+			t.Fatalf("qrcode=%q", r.URL.Query().Get("qrcode"))
+		}
+	}))
+	defer server.Close()
+
+	store := newMemoryStore()
+	client, err := New(Options{
+		State: store,
+	}, withWeixinForTest(bridge.WeixinOptions{
+		BaseURL:        server.URL,
+		RequestTimeout: time.Second,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := client.PollLogin(context.Background(), "qr-first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.PollLogin(context.Background(), "qr-second")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first.AccountID != "ilink-user-stable" || second.AccountID != "ilink-user-stable" {
+		t.Fatalf("account ids first=%q second=%q", first.AccountID, second.AccountID)
+	}
+	if len(store.accounts) != 1 {
+		t.Fatalf("accounts=%+v", store.accounts)
+	}
+	account := store.accounts["ilink-user-stable"]
+	if account == nil || account.BotToken != "token-second" || account.ILinkBotID != "bot-scan-second" {
+		t.Fatalf("account=%+v", account)
 	}
 }
 
@@ -125,7 +186,7 @@ func TestChannelSendTextUsesStoredAccountAndContextToken(t *testing.T) {
 	defer server.Close()
 
 	store := newMemoryStore()
-	account, err := store.SaveLogin(context.Background(), "account-1", "token-1", server.URL, "ilink-user-1")
+	account, err := store.SaveLogin(context.Background(), "account-1", "token-1", server.URL, "ilink-user-1", "ilink-bot-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +243,7 @@ func (s *memoryStore) SaveAccount(ctx context.Context, account *AccountState) er
 	return nil
 }
 
-func (s *memoryStore) SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error) {
+func (s *memoryStore) SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID, ilinkBotID string) (*AccountState, error) {
 	account, err := s.LoadAccount(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -190,6 +251,7 @@ func (s *memoryStore) SaveLogin(ctx context.Context, accountID, botToken, baseUR
 	account.BotToken = botToken
 	account.BaseURL = baseURL
 	account.ILinkUserID = ilinkUserID
+	account.ILinkBotID = ilinkBotID
 	account.MarkActive()
 	if err := s.SaveAccount(ctx, account); err != nil {
 		return nil, err

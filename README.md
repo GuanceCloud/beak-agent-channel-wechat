@@ -180,11 +180,11 @@ if status.Confirmed {
 
 Confirmed Weixin login returns credential fields:
 
-- `account_id`
+- `account_id`: SDK-normalized stable account key. Weixin prefers `ilink_user_id` and only falls back to `ilink_bot_id` when the user id is absent.
 - `bot_token`
 - `base_url`
-- `ilink_user_id`
-- `ilink_bot_id`
+- `ilink_user_id`: Weixin iLink user identity and the stable account identity source.
+- `ilink_bot_id`: Weixin iLink bot identity. It can change across QR logins, so do not use it as the account dedupe or binding key.
 
 ## Starting Accounts
 
@@ -217,11 +217,11 @@ Credential is secret and should be encrypted by Beak host:
 
 ```json
 {
-  "account_id": "weixin-account-id",
+  "account_id": "ilink-user-id",
   "bot_token": "...",
   "base_url": "https://ilinkai.weixin.qq.com",
-  "ilink_user_id": "...",
-  "ilink_bot_id": "..."
+  "ilink_user_id": "ilink-user-id",
+  "ilink_bot_id": "ilink-bot-id"
 }
 ```
 

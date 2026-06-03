@@ -51,10 +51,9 @@ func (Connector) CredentialSchema(context.Context) sdk.CredentialSchema {
 func (Connector) ValidateCredential(_ context.Context, req sdk.CredentialValidationRequest) (*sdk.CredentialValidationResult, error) {
 	credential := cloneMap(req.Credential)
 	state := cloneMap(req.State)
-	accountKey := firstString(credential["account_id"], credential["ilink_bot_id"])
+	accountKey := firstString(credential["ilink_user_id"], credential["account_id"], credential["ilink_bot_id"])
 	if accountKey != "" {
 		credential["account_id"] = accountKey
-		credential["ilink_bot_id"] = accountKey
 	}
 	return &sdk.CredentialValidationResult{
 		Valid:       true,
@@ -288,6 +287,9 @@ func accountMatches(account sdk.ChannelAccount, accountID string) bool {
 	if strings.TrimSpace(stringValue(account.Credential["account_id"])) == accountID {
 		return true
 	}
+	if strings.TrimSpace(stringValue(account.Credential["ilink_user_id"])) == accountID {
+		return true
+	}
 	if strings.TrimSpace(stringValue(account.Credential["ilink_bot_id"])) == accountID {
 		return true
 	}
@@ -295,7 +297,7 @@ func accountMatches(account sdk.ChannelAccount, accountID string) bool {
 }
 
 func accountKey(account sdk.ChannelAccount) string {
-	return firstString(account.UUID, account.Credential["account_id"], account.Credential["ilink_bot_id"])
+	return firstString(account.UUID, account.Credential["account_id"], account.Credential["ilink_user_id"], account.Credential["ilink_bot_id"])
 }
 
 func appendUniqueNativeAccount(accounts []Account, accountID string) []Account {
@@ -410,7 +412,7 @@ func (s *connectorStateStore) SaveAccount(ctx context.Context, account *AccountS
 	return nil
 }
 
-func (s *connectorStateStore) SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error) {
+func (s *connectorStateStore) SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID, ilinkBotID string) (*AccountState, error) {
 	account, err := s.LoadAccount(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -418,6 +420,7 @@ func (s *connectorStateStore) SaveLogin(ctx context.Context, accountID, botToken
 	account.BotToken = botToken
 	account.BaseURL = baseURL
 	account.ILinkUserID = ilinkUserID
+	account.ILinkBotID = ilinkBotID
 	account.MarkActive()
 	if err := s.SaveAccount(ctx, account); err != nil {
 		return nil, err
@@ -429,10 +432,13 @@ func (s *connectorStateStore) accountID(account sdk.ChannelAccount) string {
 	if account.UUID != "" {
 		return account.UUID
 	}
-	if value, _ := account.Credential["ilink_bot_id"].(string); value != "" {
+	if value, _ := account.Credential["account_id"].(string); value != "" {
 		return value
 	}
-	if value, _ := account.Credential["account_id"].(string); value != "" {
+	if value, _ := account.Credential["ilink_user_id"].(string); value != "" {
+		return value
+	}
+	if value, _ := account.Credential["ilink_bot_id"].(string); value != "" {
 		return value
 	}
 	return ""
@@ -450,12 +456,16 @@ func accountStateToSDK(account AccountState, existing sdk.ChannelAccount) sdk.Ch
 		existing.UUID = account.AccountID
 	}
 	existing.Platform = Platform
+	ilinkBotID := strings.TrimSpace(account.ILinkBotID)
+	if ilinkBotID == "" && strings.TrimSpace(account.ILinkUserID) == "" {
+		ilinkBotID = account.AccountID
+	}
 	existing.Credential = map[string]any{
 		"account_id":    account.AccountID,
 		"bot_token":     account.BotToken,
 		"base_url":      account.BaseURL,
 		"ilink_user_id": account.ILinkUserID,
-		"ilink_bot_id":  account.AccountID,
+		"ilink_bot_id":  ilinkBotID,
 	}
 	existing.State = stateToMap(account)
 	return existing
@@ -672,10 +682,11 @@ func (a gatewayRuntimeAdapter) BridgeParticipantID() string {
 
 func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 	state := AccountState{
-		AccountID:   firstString(account.UUID, account.Credential["account_id"], account.Credential["ilink_bot_id"]),
+		AccountID:   firstString(account.UUID, account.Credential["account_id"], account.Credential["ilink_user_id"], account.Credential["ilink_bot_id"]),
 		BotToken:    stringValue(account.Credential["bot_token"]),
 		BaseURL:     stringValue(account.Credential["base_url"]),
-		ILinkUserID: stringValue(account.Credential["ilink_user_id"]),
+		ILinkUserID: firstString(account.Credential["ilink_user_id"], account.State["ilink_user_id"]),
+		ILinkBotID:  firstString(account.Credential["ilink_bot_id"], account.State["ilink_bot_id"]),
 	}
 	state.Status = stringValue(account.State["status"])
 	state.LastError = stringValue(account.State["last_error"])
@@ -695,6 +706,8 @@ func stateToMap(account AccountState) map[string]any {
 	account.EnsureMaps()
 	return map[string]any{
 		"channel_link_session": account.ChannelLinkSession,
+		"ilink_user_id":        account.ILinkUserID,
+		"ilink_bot_id":         account.ILinkBotID,
 		"status":               account.Status,
 		"last_error":           account.LastError,
 		"get_updates_buf":      account.GetUpdatesBuf,

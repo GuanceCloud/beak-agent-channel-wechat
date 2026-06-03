@@ -18,6 +18,7 @@ type AccountState struct {
 	BotToken           string            `json:"bot_token"`
 	BaseURL            string            `json:"base_url"`
 	ILinkUserID        string            `json:"ilink_user_id,omitempty"`
+	ILinkBotID         string            `json:"ilink_bot_id,omitempty"`
 	Status             string            `json:"status,omitempty"`
 	LastError          string            `json:"last_error,omitempty"`
 	ChannelLinkSession string            `json:"channel_link_session,omitempty"`
