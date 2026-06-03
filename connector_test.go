@@ -37,6 +37,33 @@ func TestWeixinConnectorMetadataAndSchema(t *testing.T) {
 	}
 }
 
+func TestWeixinConnectorValidateCredentialDefaultsToValid(t *testing.T) {
+	result, err := NewConnector().ValidateCredential(context.Background(), sdk.CredentialValidationRequest{
+		Credential: map[string]any{
+			"bot_token":     "token-1",
+			"ilink_bot_id":  "account-1",
+			"ilink_user_id": "ilink-user-1",
+			"base_url":      "https://ilinkai.weixin.qq.com",
+		},
+		State: map[string]any{"get_updates_buf": "buf-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Valid || result.AccountKey != "account-1" {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.Credential["account_id"] != "account-1" || result.Credential["ilink_bot_id"] != "account-1" {
+		t.Fatalf("credential=%+v", result.Credential)
+	}
+	if result.State["get_updates_buf"] != "buf-1" {
+		t.Fatalf("state=%+v", result.State)
+	}
+	if result.Metadata["validation"] != "default_pass" {
+		t.Fatalf("metadata=%+v", result.Metadata)
+	}
+}
+
 func TestWeixinConnectorRuntimeFromSDKPreservesNativeBotAgent(t *testing.T) {
 	native, _ := Connector{}.runtimeFromSDK(sdk.Runtime{
 		WorkspaceUUID: "workspace-1",
