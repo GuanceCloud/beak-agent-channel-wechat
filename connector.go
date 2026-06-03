@@ -48,6 +48,27 @@ func (Connector) CredentialSchema(context.Context) sdk.CredentialSchema {
 	}
 }
 
+func (Connector) ValidateCredential(_ context.Context, req sdk.CredentialValidationRequest) (*sdk.CredentialValidationResult, error) {
+	credential := cloneMap(req.Credential)
+	state := cloneMap(req.State)
+	accountKey := firstString(credential["account_id"], credential["ilink_bot_id"])
+	if accountKey != "" {
+		credential["account_id"] = accountKey
+		credential["ilink_bot_id"] = accountKey
+	}
+	return &sdk.CredentialValidationResult{
+		Valid:       true,
+		AccountKey:  accountKey,
+		DisplayName: firstString(credential["display_name"], credential["nickname"], credential["ilink_user_id"], accountKey, "Weixin"),
+		Credential:  credential,
+		State:       state,
+		Metadata: map[string]any{
+			"platform":   Platform,
+			"validation": "default_pass",
+		},
+	}, nil
+}
+
 func (c Connector) StartLogin(ctx context.Context, req sdk.LoginStartRequest) (*sdk.LoginChallenge, error) {
 	runtime, _ := c.runtimeFromSDK(req.Runtime, nil)
 	challenge, err := c.channel.StartLogin(ctx, runtime)
@@ -800,6 +821,14 @@ func firstValue(values ...any) any {
 		}
 	}
 	return nil
+}
+
+func cloneMap(value map[string]any) map[string]any {
+	out := make(map[string]any, len(value))
+	for key, item := range value {
+		out[key] = item
+	}
+	return out
 }
 
 var _ sdk.Connector = Connector{}
