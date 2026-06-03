@@ -75,7 +75,7 @@ func TestChannelSendTextUsesInjectedAccountStore(t *testing.T) {
 	httpClient := &http.Client{Transport: rewriteTransport{target: targetURL, base: http.DefaultTransport}}
 
 	store := newMemoryStore()
-	account, err := store.SaveLogin(context.Background(), "account-1", "token-1", server.URL, "ilink-user-1")
+	account, err := store.SaveLogin(context.Background(), "account-1", "token-1", server.URL, "ilink-user-1", "ilink-bot-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,14 +145,14 @@ func TestCloudLoginStartAndPollStoresAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.Confirmed || status.AccountID != "account-1" {
+	if !status.Confirmed || status.AccountID != "ilink-user-1" {
 		t.Fatalf("status=%+v", status)
 	}
-	account, err := store.LoadAccount(context.Background(), "account-1")
+	account, err := store.LoadAccount(context.Background(), "ilink-user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if account.BotToken != "token-1" || account.BaseURL != server.URL || account.ILinkUserID != "ilink-user-1" {
+	if account.BotToken != "token-1" || account.BaseURL != server.URL || account.ILinkUserID != "ilink-user-1" || account.ILinkBotID != "account-1" {
 		t.Fatalf("account=%+v", account)
 	}
 }
@@ -199,7 +199,7 @@ func TestChannelStartUsesInjectedRuntimeAndStore(t *testing.T) {
 	defer server.Close()
 
 	store := newMemoryStore()
-	if _, err := store.SaveLogin(context.Background(), "account-1", "token-1", server.URL, "ilink-user-1"); err != nil {
+	if _, err := store.SaveLogin(context.Background(), "account-1", "token-1", server.URL, "ilink-user-1", "ilink-bot-1"); err != nil {
 		t.Fatal(err)
 	}
 	runtime := &fakeRuntime{}
@@ -277,7 +277,7 @@ func (s *memoryStore) SaveAccount(ctx context.Context, account *AccountState) er
 	return nil
 }
 
-func (s *memoryStore) SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID string) (*AccountState, error) {
+func (s *memoryStore) SaveLogin(ctx context.Context, accountID, botToken, baseURL, ilinkUserID, ilinkBotID string) (*AccountState, error) {
 	account, err := s.LoadAccount(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -285,6 +285,7 @@ func (s *memoryStore) SaveLogin(ctx context.Context, accountID, botToken, baseUR
 	account.BotToken = botToken
 	account.BaseURL = baseURL
 	account.ILinkUserID = ilinkUserID
+	account.ILinkBotID = ilinkBotID
 	account.MarkActive()
 	if err := s.SaveAccount(ctx, account); err != nil {
 		return nil, err

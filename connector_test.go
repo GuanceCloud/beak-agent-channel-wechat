@@ -50,10 +50,10 @@ func TestWeixinConnectorValidateCredentialDefaultsToValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Valid || result.AccountKey != "account-1" {
+	if !result.Valid || result.AccountKey != "ilink-user-1" {
 		t.Fatalf("result=%+v", result)
 	}
-	if result.Credential["account_id"] != "account-1" || result.Credential["ilink_bot_id"] != "account-1" {
+	if result.Credential["account_id"] != "ilink-user-1" || result.Credential["ilink_bot_id"] != "account-1" {
 		t.Fatalf("credential=%+v", result.Credential)
 	}
 	if result.State["get_updates_buf"] != "buf-1" {
@@ -130,8 +130,11 @@ func TestWeixinConnectorQRCodeLoginThroughSDK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.Confirmed || status.Account.UUID != "account-1" {
+	if !status.Confirmed || status.Account.UUID != "ilink-user-1" {
 		t.Fatalf("status=%+v", status)
+	}
+	if status.Credential["account_id"] != "ilink-user-1" || status.Credential["ilink_bot_id"] != "account-1" {
+		t.Fatalf("credential=%+v", status.Credential)
 	}
 	if status.Credential["bot_token"] != "token-1" || status.Credential["base_url"] != server.URL {
 		t.Fatalf("credential=%+v", status.Credential)
@@ -292,7 +295,7 @@ func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.Confirmed || status.Account.UUID != "account-scenario-1" {
+	if !status.Confirmed || status.Account.UUID != "ilink-user-scenario-1" {
 		t.Fatalf("status=%+v", status)
 	}
 
@@ -362,14 +365,14 @@ func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
 	if created.SessionUUID != "session-scenario-1" || created.Content != "你好 Beak" || created.SenderID != "im:weixin:direct:user-scenario-1:user:user-scenario-1" {
 		t.Fatalf("created message=%+v", created)
 	}
-	if created.DedupeKey != "account-scenario-1:message:1001" {
+	if created.DedupeKey != "ilink-user-scenario-1:message:1001" {
 		t.Fatalf("dedupe key=%q", created.DedupeKey)
 	}
-	if len(chatSessions) != 1 || chatSessions[0].AccountUUID != "account-scenario-1" || chatSessions[0].ChatType != sdk.ChatTypeDirect || chatSessions[0].ChatID != "user-scenario-1" {
+	if len(chatSessions) != 1 || chatSessions[0].AccountUUID != "ilink-user-scenario-1" || chatSessions[0].ChatType != sdk.ChatTypeDirect || chatSessions[0].ChatID != "user-scenario-1" {
 		t.Fatalf("chat sessions=%+v", chatSessions)
 	}
 
-	state := accountStore.state("account-scenario-1")
+	state := accountStore.state("ilink-user-scenario-1")
 	if state["get_updates_buf"] != "buf-scenario-1" {
 		t.Fatalf("state=%+v", state)
 	}
@@ -387,7 +390,7 @@ func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
 		Account:    status.Account,
 		HTTPClient: httpClient,
 	}, sdk.OutboundMessage{
-		AccountUUID: "account-scenario-1",
+		AccountUUID: "ilink-user-scenario-1",
 		ChatType:    sdk.ChatTypeDirect,
 		ChatID:      "user-scenario-1",
 		Text:        "mention reply",
@@ -400,7 +403,7 @@ func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mentionResult.AccountUUID != "account-scenario-1" || mentionResult.Platform != Platform {
+	if mentionResult.AccountUUID != "ilink-user-scenario-1" || mentionResult.Platform != Platform {
 		t.Fatalf("mention result=%+v", mentionResult)
 	}
 	select {
