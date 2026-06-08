@@ -17,6 +17,7 @@ v1 支持：
 - Beak agent 文本或 markdown 格式输出通过 `connector.Send` / `ilink/bot/sendmessage` 回发到微信；markdown 使用同一组通用字段，并在 SDK 内退化为 text。
 - 通过 `getconfig` 和 `sendtyping` 发送微信 typing 状态。
 - 单聊和显式群聊标准化。
+- 标准 `bot_identity` state 用于统一 SDK 暴露；账号身份仍优先使用稳定的 `ilink_user_id`。
 - 一个已连接 bot account 中的一个群聊对应一个 Beak session。
 - 一个已连接 bot account 中的一个单聊对应一个 Beak session。
 - 如果同一个微信群里接入多个微信 bot account，每个 bot account 都创建或复用自己的 Beak session。
@@ -219,7 +220,7 @@ err := connector.Start(ctx, sdk.Runtime{
 - `Credential`：仅在当前进程内使用的已解密 credential JSON。
 - `State`：从数据库加载的 connector state JSON。
 
-Connector 会为每个 account 启动微信 update polling，并把入站消息标准化后写入 Beak host 注入的 Gateway runtime。SDK 的 `InboundMessage` 契约包含 `mentions` 和 `mentioned_me`；当前 iLink 文本路径在 update payload 未暴露 @ 元数据时保持为空。
+Connector 会为每个 account 启动微信 update polling，并把入站消息标准化后写入 Beak host 注入的 Gateway runtime。SDK 的 `InboundMessage` 契约包含 `mentions`、`mention_all` 和 `mentioned_me`；当前 iLink 文本路径在 update payload 未暴露 @ 元数据时保持为空。如果 payload 明确标记当前 bot 被提及，即使正文为空也会进入 Beak，用于 follow-up；正文为空且没有 bot mention 时可以被忽略。
 
 ## Credential 和 State
 
@@ -247,11 +248,23 @@ State 不是 credential。Beak host 可以先把它保存在 channel account 上
   "inbound_seen": {},
   "peer_sessions": {},
   "stream_cursors": {},
-  "sent_beak_messages": {}
+  "sent_beak_messages": {},
+  "bot_identity": {
+    "id": "ilink-bot-id",
+    "id_type": "ilink_bot_id"
+  },
+  "bot_identities": [
+    {
+      "id": "ilink-bot-id",
+      "id_type": "ilink_bot_id"
+    }
+  ]
 }
 ```
 
 Connector 通过 `sdk.AccountStore` 更新 state。SDK 不写本地文件。
+
+`ValidateCredential(ctx, req)` 对微信默认返回 `Valid=true`，因为有效 token 来自已成功的二维码登录。它会优先用 `ilink_user_id` 归一化 `account_id`，并把 `ilink_bot_id` 只作为 bot identity metadata 保存。不要用 `ilink_bot_id` 做 account 去重或 Agent 绑定身份，因为它可能在重复扫码后变化。
 
 ## Session 规则
 
@@ -264,6 +277,8 @@ workspace_uuid + platform + account_uuid + chat_type + chat_id
 ```
 
 `account_uuid` 是 Beak `channel_accounts.uuid`。对于还没有 Beak uuid 的兼容旧 adapter，可使用该连接保存的稳定 account id。
+
+`peer_sessions` 是 chat 维度缓存，不要把 update seq、message id 或未来可能出现的 thread/topic id 拼进这个 key。
 
 推荐 Beak session 字段：
 

@@ -15,6 +15,7 @@ This repository is importable library code. It is not a CLI, does not read user-
 - Text or markdown-formatted Beak agent output back to Weixin through `connector.Send` / `ilink/bot/sendmessage`; markdown uses the same common fields and falls back to text inside the SDK.
 - Weixin typing status through `getconfig` and `sendtyping`.
 - Direct chat and explicit group chat normalization.
+- Standard `bot_identity` state for unified SDK exposure, while account identity remains the stable `ilink_user_id` when available.
 - One connected bot account plus one group chat maps to one Beak session; one connected bot account plus one direct chat maps to one Beak session.
 - If multiple Weixin bot accounts are in the same group, each bot account creates or reuses its own Beak session for that group.
 - The bot account connection is stored as `channel_accounts`; starting it does not create a task or an extra link session.
@@ -209,7 +210,7 @@ Each `sdk.ChannelAccount` should include:
 - `Credential`: decrypted credential JSON for this process only.
 - `State`: persisted connector state JSON.
 
-The connector starts Weixin update polling for each account and sends standardized inbound messages into the injected Gateway runtime. The SDK `InboundMessage` contract includes `mentions` and `mentioned_me`; the current iLink text path leaves them empty unless future Weixin update payloads expose mention metadata.
+The connector starts Weixin update polling for each account and sends standardized inbound messages into the injected Gateway runtime. The SDK `InboundMessage` contract includes `mentions`, `mention_all`, and `mentioned_me`; the current iLink text path leaves them empty unless future Weixin update payloads expose mention metadata. If a payload explicitly marks the current bot as mentioned, an empty text message is still delivered to Beak for follow-up handling; empty text without a bot mention can be ignored.
 
 ## Credential And State
 
@@ -237,11 +238,23 @@ State is not credential. Beak host stores it with the channel account, or later 
   "inbound_seen": {},
   "peer_sessions": {},
   "stream_cursors": {},
-  "sent_beak_messages": {}
+  "sent_beak_messages": {},
+  "bot_identity": {
+    "id": "ilink-bot-id",
+    "id_type": "ilink_bot_id"
+  },
+  "bot_identities": [
+    {
+      "id": "ilink-bot-id",
+      "id_type": "ilink_bot_id"
+    }
+  ]
 }
 ```
 
 The connector updates state through `sdk.AccountStore`. It does not write local files.
+
+`ValidateCredential(ctx, req)` defaults to `Valid=true` for Weixin because successful QR login has already produced the token. It normalizes `account_id` from `ilink_user_id` when present and preserves `ilink_bot_id` only as bot identity metadata. Do not use `ilink_bot_id` as account dedupe or Agent binding identity because it can change across scans.
 
 ## Session Rules
 
@@ -254,6 +267,8 @@ workspace_uuid + platform + account_uuid + chat_type + chat_id
 ```
 
 `account_uuid` is the Beak `channel_accounts.uuid` for the connected bot account. For legacy adapters that do not have a Beak uuid yet, use the stable account id stored with that connection.
+
+`peer_sessions` is chat-scoped. Do not include update sequence, message id, or future thread/topic ids in this cache key.
 
 Recommended Beak session fields:
 

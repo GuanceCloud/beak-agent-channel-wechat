@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -123,6 +124,59 @@ func TestProcessGroupUpdateUsesGroupChatIdentity(t *testing.T) {
 	}
 	if inbound.Raw["mention_all"] != true {
 		t.Fatalf("raw=%+v", inbound.Raw)
+	}
+}
+
+func TestBuildInboundMessageMentionAllDoesNotMentionBot(t *testing.T) {
+	inbound := BuildInboundMessage("workspace-1", "channel-1", "account-1", weixin.WeixinMessage{
+		MessageID:    103,
+		FromUserID:   "user-1",
+		ToUserID:     "bot-1",
+		GroupID:      "group-1",
+		MessageType:  weixin.MessageTypeUser,
+		MessageState: weixin.MessageStateFinish,
+		MentionAll:   true,
+		ItemList: []weixin.MessageItem{
+			{Type: weixin.MessageItemTypeText, TextItem: &weixin.TextItem{Text: "hello all"}},
+		},
+	}, "hello all")
+	if !inbound.MentionAll || inbound.MentionedMe {
+		t.Fatalf("inbound=%+v", inbound)
+	}
+}
+
+func TestProcessGroupOnlyBotMentionWithEmptyTextIsDelivered(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1"}
+	account.EnsureMaps()
+	runner := testRunner(store, account)
+
+	msg := weixin.WeixinMessage{
+		MessageID:    104,
+		FromUserID:   "user-1",
+		ToUserID:     "bot-1",
+		GroupID:      "group-1",
+		MessageType:  weixin.MessageTypeUser,
+		MessageState: weixin.MessageStateFinish,
+		MentionedMe:  true,
+		ItemList: []weixin.MessageItem{
+			{Type: weixin.MessageItemTypeText, TextItem: &weixin.TextItem{Text: ""}},
+		},
+	}
+	sessionUUID, processed, err := runner.ProcessUpdate(context.Background(), msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processed || sessionUUID != "sess-1" {
+		t.Fatalf("processed=%v session=%q", processed, sessionUUID)
+	}
+	fake := runner.beak.(*fakeBeak)
+	if len(fake.createdMessages) != 1 || strings.TrimSpace(fake.createdMessages[0].Content) != "" {
+		t.Fatalf("createdMessages=%+v", fake.createdMessages)
+	}
+	inbound, ok := fake.createdMessages[0].Metadata["inbound_message"].(sdk.InboundMessage)
+	if !ok || !inbound.MentionedMe || strings.TrimSpace(inbound.Text) != "" {
+		t.Fatalf("inbound=%+v metadata=%+v", inbound, fake.createdMessages[0].Metadata)
 	}
 }
 

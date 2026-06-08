@@ -34,6 +34,8 @@ func (c Connector) Metadata() sdk.ConnectorMetadata {
 			Media:          caps.Media,
 			GroupChat:      true,
 			DirectChat:     caps.DirectChat,
+			Stream:         true,
+			Webhook:        false,
 			BlockStreaming: caps.BlockStreaming,
 		},
 	}
@@ -54,6 +56,14 @@ func (Connector) ValidateCredential(_ context.Context, req sdk.CredentialValidat
 	accountKey := firstString(credential["ilink_user_id"], credential["account_id"], credential["ilink_bot_id"])
 	if accountKey != "" {
 		credential["account_id"] = accountKey
+	}
+	if ilinkBotID := firstString(credential["ilink_bot_id"], state["ilink_bot_id"], standardBotIdentityValue(state, "ilink_bot_id")); ilinkBotID != "" {
+		credential["ilink_bot_id"] = ilinkBotID
+		state["ilink_bot_id"] = ilinkBotID
+		identity := weixinBotIdentityState(AccountState{ILinkBotID: ilinkBotID})
+		if len(identity) > 0 {
+			state["bot_identity"] = identity
+		}
 	}
 	return &sdk.CredentialValidationResult{
 		Valid:       true,
@@ -686,7 +696,7 @@ func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 		BotToken:    stringValue(account.Credential["bot_token"]),
 		BaseURL:     stringValue(account.Credential["base_url"]),
 		ILinkUserID: firstString(account.Credential["ilink_user_id"], account.State["ilink_user_id"]),
-		ILinkBotID:  firstString(account.Credential["ilink_bot_id"], account.State["ilink_bot_id"]),
+		ILinkBotID:  firstString(account.Credential["ilink_bot_id"], account.State["ilink_bot_id"], standardBotIdentityValue(account.State, "ilink_bot_id")),
 	}
 	state.Status = stringValue(account.State["status"])
 	state.LastError = stringValue(account.State["last_error"])
@@ -704,7 +714,7 @@ func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 
 func stateToMap(account AccountState) map[string]any {
 	account.EnsureMaps()
-	return map[string]any{
+	out := map[string]any{
 		"channel_link_session": account.ChannelLinkSession,
 		"ilink_user_id":        account.ILinkUserID,
 		"ilink_bot_id":         account.ILinkBotID,
@@ -719,6 +729,86 @@ func stateToMap(account AccountState) map[string]any {
 		"stream_cursors":       account.StreamCursors,
 		"updated_at":           account.UpdatedAt,
 	}
+	if identity := weixinBotIdentityState(account); len(identity) > 0 {
+		out["bot_identity"] = identity
+		out["bot_identities"] = []map[string]any{identity}
+	}
+	return out
+}
+
+func weixinBotIdentityState(account AccountState) map[string]any {
+	ilinkBotID := strings.TrimSpace(account.ILinkBotID)
+	if ilinkBotID == "" {
+		return nil
+	}
+	return map[string]any{
+		"id":      ilinkBotID,
+		"id_type": "ilink_bot_id",
+	}
+}
+
+func standardBotIdentityValue(state map[string]any, idTypes ...string) string {
+	wanted := make(map[string]struct{}, len(idTypes))
+	for _, idType := range idTypes {
+		idType = strings.TrimSpace(idType)
+		if idType != "" {
+			wanted[idType] = struct{}{}
+		}
+	}
+	for _, identity := range standardBotIdentityMaps(state) {
+		idType := strings.TrimSpace(stringValue(identity["id_type"]))
+		if len(wanted) > 0 {
+			if _, ok := wanted[idType]; !ok {
+				continue
+			}
+		}
+		if id := strings.TrimSpace(stringValue(identity["id"])); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func standardBotIdentityMaps(state map[string]any) []map[string]any {
+	if len(state) == 0 {
+		return nil
+	}
+	var out []map[string]any
+	out = append(out, botIdentityMapsFromAny(state["bot_identities"])...)
+	out = append(out, botIdentityMapsFromAny(state["bot_identity"])...)
+	return out
+}
+
+func botIdentityMapsFromAny(value any) []map[string]any {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		return []map[string]any{typed}
+	case []map[string]any:
+		return typed
+	case []any:
+		out := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, botIdentityMapsFromAny(item)...)
+		}
+		return out
+	case json.RawMessage:
+		var list []map[string]any
+		if err := json.Unmarshal(typed, &list); err == nil {
+			return list
+		}
+		var item map[string]any
+		if err := json.Unmarshal(typed, &item); err == nil {
+			return []map[string]any{item}
+		}
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return nil
+		}
+		return botIdentityMapsFromAny(json.RawMessage(typed))
+	}
+	return nil
 }
 
 func stringMap(value any) map[string]string {

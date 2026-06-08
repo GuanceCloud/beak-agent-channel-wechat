@@ -215,7 +215,7 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMessage) (string, bool, error) {
 	text := strings.TrimSpace(msg.Text())
 	chat := msg.ChatIdentity()
-	if chat.ChatID == "" || chat.SenderID == "" || text == "" {
+	if chat.ChatID == "" || chat.SenderID == "" {
 		return "", false, nil
 	}
 	if msg.MessageType != 0 && msg.MessageType != weixin.MessageTypeUser {
@@ -225,6 +225,9 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 		return "", false, nil
 	}
 	inbound := BuildInboundMessage(r.options.WorkspaceRef, r.options.ChannelUUID, r.account.AccountID, msg, text)
+	if text == "" && !inbound.MentionedMe {
+		return "", false, nil
+	}
 
 	key := inbound.DedupeKey
 	chatKey := chat.StateKey()
@@ -317,7 +320,7 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 		Text:          text,
 		DedupeKey:     msg.DedupeKey(accountID),
 		Mentions:      mentions,
-		MentionedMe:   msg.MentionedMe || msg.IsInAtList || mentionAll,
+		MentionedMe:   msg.MentionedMe || msg.IsInAtList,
 		MentionAll:    mentionAll,
 		Raw: map[string]any{
 			"seq":             msg.Seq,
