@@ -24,6 +24,9 @@ func TestWeixinConnectorMetadataAndSchema(t *testing.T) {
 	if !metadata.Capabilities.Text || !metadata.Capabilities.DirectChat || !metadata.Capabilities.GroupChat || metadata.Capabilities.Media {
 		t.Fatalf("capabilities=%+v", metadata.Capabilities)
 	}
+	if !metadata.Capabilities.Stream || metadata.Capabilities.Webhook {
+		t.Fatalf("stream/webhook capabilities=%+v", metadata.Capabilities)
+	}
 	if len(metadata.Capabilities.LoginModes) != 1 || metadata.Capabilities.LoginModes[0] != sdk.LoginModeQRCode {
 		t.Fatalf("login modes=%+v", metadata.Capabilities.LoginModes)
 	}
@@ -58,6 +61,10 @@ func TestWeixinConnectorValidateCredentialDefaultsToValid(t *testing.T) {
 	}
 	if result.State["get_updates_buf"] != "buf-1" {
 		t.Fatalf("state=%+v", result.State)
+	}
+	identity, ok := result.State["bot_identity"].(map[string]any)
+	if !ok || identity["id"] != "account-1" || identity["id_type"] != "ilink_bot_id" {
+		t.Fatalf("bot_identity=%+v state=%+v", result.State["bot_identity"], result.State)
 	}
 	if result.Metadata["validation"] != "default_pass" {
 		t.Fatalf("metadata=%+v", result.Metadata)
@@ -665,7 +672,7 @@ func TestWeixinConnectorScenarioPollingDedupesAndCachesChatContext(t *testing.T)
 		t.Fatalf("dedupe keys=%q %q", messages[0].DedupeKey, messages[1].DedupeKey)
 	}
 	inbound, ok := messages[0].Metadata["inbound_message"].(sdk.InboundMessage)
-	if !ok || !inbound.MentionAll || !inbound.MentionedMe || len(inbound.Mentions) != 2 {
+	if !ok || !inbound.MentionAll || inbound.MentionedMe || len(inbound.Mentions) != 2 {
 		t.Fatalf("inbound=%+v metadata=%+v", inbound, messages[0].Metadata)
 	}
 
