@@ -632,20 +632,31 @@ func mentionIdentityFromAny(value any) sdk.MentionIdentity {
 }
 
 func (a gatewayRuntimeAdapter) EnsureWeixinChatSession(ctx context.Context, accountID, chatType, chatID, senderID string) (string, error) {
+	identity := weixinSDKChatIdentity(weixin.ChatIdentity{ChatType: chatType, ChatID: chatID, SenderID: senderID})
 	return a.gateway.EnsureChatSession(ctx, sdk.EnsureChatSessionRequest{
 		WorkspaceUUID:       a.workspaceUUID,
 		Platform:            a.platform,
 		AccountUUID:         accountID,
 		ChatType:            chatType,
 		ChatID:              chatID,
+		ChatIdentity:        identity,
 		SenderID:            senderID,
 		AgentParticipantID:  a.AgentParticipantID(),
 		BridgeParticipantID: a.BridgeParticipantID(),
 		Metadata: map[string]any{
-			"source":       "weixin",
-			"account_uuid": accountID,
+			"source":        "weixin",
+			"account_uuid":  accountID,
+			"chat_identity": identity,
 		},
 	})
+}
+
+func weixinSDKChatIdentity(chat weixin.ChatIdentity) sdk.ChatIdentity {
+	return sdk.ChatIdentity{
+		ID:     strings.TrimSpace(chat.ChatID),
+		IDType: "chat_id",
+		Type:   strings.TrimSpace(chat.ChatType),
+	}
 }
 
 func (a gatewayRuntimeAdapter) CreateWeixinUserMessage(ctx context.Context, sessionUUID string, msg UserMessage) (string, error) {

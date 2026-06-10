@@ -210,7 +210,7 @@ Each `sdk.ChannelAccount` should include:
 - `Credential`: decrypted credential JSON for this process only.
 - `State`: persisted connector state JSON.
 
-The connector starts Weixin update polling for each account and sends standardized inbound messages into the injected Gateway runtime. The SDK `InboundMessage` contract includes `mentions`, `mention_all`, and `mentioned_me`; the current iLink text path leaves them empty unless future Weixin update payloads expose mention metadata. If a payload explicitly marks the current bot as mentioned, an empty text message is still delivered to Beak for follow-up handling; empty text without a bot mention can be ignored.
+The connector starts Weixin update polling for each account and sends standardized inbound messages into the injected Gateway runtime. The SDK `InboundMessage` contract includes `chat_identity`, `chat_display_name`, `mentions`, `mention_all`, and `mentioned_me`; the current iLink text path provides stable `chat_identity.id/type`, while display fields stay empty unless future Weixin update payloads expose reliable chat names. If a payload explicitly marks the current bot as mentioned, an empty text message is still delivered to Beak for follow-up handling; empty text without a bot mention can be ignored.
 
 ## Credential And State
 
