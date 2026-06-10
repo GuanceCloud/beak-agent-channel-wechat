@@ -315,6 +315,7 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 		ChannelUUID:   channelUUID,
 		ChatType:      chat.ChatType,
 		ChatID:        chat.ChatID,
+		ChatIdentity:  weixinSDKChatIdentity(chat),
 		SenderID:      chat.SenderID,
 		MessageID:     messageID,
 		Text:          text,
@@ -331,6 +332,7 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 			"create_time_ms":  msg.CreateTimeMS,
 			"session_id":      msg.SessionID,
 			"group_id":        msg.GroupID,
+			"chat_identity":   weixinSDKChatIdentity(chat),
 			"message_type":    msg.MessageType,
 			"message_state":   msg.MessageState,
 			"context_token":   msg.ContextToken,
@@ -339,6 +341,14 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 			"mentioned_me":    msg.MentionedMe || msg.IsInAtList,
 			"mention_all":     mentionAll,
 		},
+	}
+}
+
+func weixinSDKChatIdentity(chat weixin.ChatIdentity) sdk.ChatIdentity {
+	return sdk.ChatIdentity{
+		ID:     strings.TrimSpace(chat.ChatID),
+		IDType: "chat_id",
+		Type:   strings.TrimSpace(chat.ChatType),
 	}
 }
 

@@ -220,7 +220,7 @@ err := connector.Start(ctx, sdk.Runtime{
 - `Credential`：仅在当前进程内使用的已解密 credential JSON。
 - `State`：从数据库加载的 connector state JSON。
 
-Connector 会为每个 account 启动微信 update polling，并把入站消息标准化后写入 Beak host 注入的 Gateway runtime。SDK 的 `InboundMessage` 契约包含 `mentions`、`mention_all` 和 `mentioned_me`；当前 iLink 文本路径在 update payload 未暴露 @ 元数据时保持为空。如果 payload 明确标记当前 bot 被提及，即使正文为空也会进入 Beak，用于 follow-up；正文为空且没有 bot mention 时可以被忽略。
+Connector 会为每个 account 启动微信 update polling，并把入站消息标准化后写入 Beak host 注入的 Gateway runtime。SDK 的 `InboundMessage` 契约包含 `chat_identity`、`chat_display_name`、`mentions`、`mention_all` 和 `mentioned_me`；当前 iLink 文本路径会提供稳定的 `chat_identity.id/type`，display 字段只有在后续微信 update payload 暴露可靠 chat 名称时才填。如果 payload 明确标记当前 bot 被提及，即使正文为空也会进入 Beak，用于 follow-up；正文为空且没有 bot mention 时可以被忽略。
 
 ## Credential 和 State
 

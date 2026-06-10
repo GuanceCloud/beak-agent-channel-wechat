@@ -119,6 +119,9 @@ func TestProcessGroupUpdateUsesGroupChatIdentity(t *testing.T) {
 	if inbound.ChannelUUID != "channel-1" || inbound.AccountUUID != "account-1" || inbound.ChatType != sdk.ChatTypeGroup || inbound.ChatID != "group-1" || inbound.SenderID != "user-1" || inbound.Text != "hello group" {
 		t.Fatalf("inbound=%+v", inbound)
 	}
+	if inbound.ChatIdentity.ID != "group-1" || inbound.ChatIdentity.Type != sdk.ChatTypeGroup {
+		t.Fatalf("chat identity=%+v", inbound.ChatIdentity)
+	}
 	if !inbound.MentionedMe || !inbound.MentionAll || len(inbound.Mentions) != 3 {
 		t.Fatalf("inbound mentions=%+v mentioned_me=%v mention_all=%v", inbound.Mentions, inbound.MentionedMe, inbound.MentionAll)
 	}
