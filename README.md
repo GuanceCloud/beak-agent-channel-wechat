@@ -241,6 +241,16 @@ State is not credential. Beak host stores it with the channel account, or later 
   "inbound_seen": {},
   "peer_sessions": {},
   "stream_cursors": {},
+  "stream_connection_state": "connected",
+  "stream_connected_at": "2026-06-22T09:00:00Z",
+  "stream_last_activity_at": "2026-06-22T09:00:00Z",
+  "stream_last_event_at": "2026-06-22T09:00:00Z",
+  "stream_last_error": "",
+  "stream_last_error_at": "",
+  "stream_reconnect_requested_at": "",
+  "stream_reconnect_error": "",
+  "stream_reconnect_error_at": "",
+  "stream_session_expired": false,
   "sent_beak_messages": {},
   "bot_identity": {
     "id": "ilink-bot-id",
@@ -256,6 +266,8 @@ State is not credential. Beak host stores it with the channel account, or later 
 ```
 
 The connector updates state through `sdk.AccountStore`. It does not write local files.
+
+Weixin iLink is SDK-owned polling. Successful `getUpdates` calls write `stream_connection_state=connected` and activity timestamps. Ordinary poll errors write `stream_last_error` / `stream_last_error_at` and keep retrying. Expired sessions write `stream_connection_state=expired` and `stream_session_expired=true`. The SDK-owned stream reconnect loop writes `reconnecting`, `reconnect_failed`, and `connected` through the standard runtime health fields.
 
 `ValidateCredential(ctx, req)` defaults to `Valid=true` for Weixin because successful QR login has already produced the token. It normalizes `account_id` from `ilink_user_id` when present and preserves `ilink_bot_id` only as bot identity metadata. Do not use `ilink_bot_id` as account dedupe or Agent binding identity because it can change across scans.
 

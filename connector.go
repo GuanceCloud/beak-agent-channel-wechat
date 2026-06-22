@@ -836,6 +836,19 @@ func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 	state.InboundSeen = stringMap(account.State["inbound_seen"])
 	state.SentBeakMessages = stringMap(account.State["sent_beak_messages"])
 	state.StreamCursors = stringMap(account.State["stream_cursors"])
+	state.StreamConnectionState = stringValue(account.State[sdk.RuntimeHealthKeyStreamConnectionState])
+	state.StreamConnectedAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamConnectedAt])
+	state.StreamDisconnectedAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamDisconnectedAt])
+	state.StreamLastActivityAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamLastActivityAt])
+	state.StreamLastPingAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamLastPingAt])
+	state.StreamLastPongAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamLastPongAt])
+	state.StreamLastEventAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamLastEventAt])
+	state.StreamLastError = stringValue(account.State[sdk.RuntimeHealthKeyStreamLastError])
+	state.StreamLastErrorAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamLastErrorAt])
+	state.StreamReconnectRequestedAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamReconnectRequestedAt])
+	state.StreamReconnectError = stringValue(account.State[sdk.RuntimeHealthKeyStreamReconnectError])
+	state.StreamReconnectErrorAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamReconnectErrorAt])
+	state.StreamSessionExpired = boolValue(account.State[sdk.RuntimeHealthKeyStreamSessionExpired])
 	state.EnsureMaps()
 	return state
 }
@@ -855,7 +868,20 @@ func stateToMap(account AccountState) map[string]any {
 		"inbound_seen":         account.InboundSeen,
 		"sent_beak_messages":   account.SentBeakMessages,
 		"stream_cursors":       account.StreamCursors,
-		"updated_at":           account.UpdatedAt,
+		sdk.RuntimeHealthKeyStreamConnectionState:      account.StreamConnectionState,
+		sdk.RuntimeHealthKeyStreamConnectedAt:          account.StreamConnectedAt,
+		sdk.RuntimeHealthKeyStreamDisconnectedAt:       account.StreamDisconnectedAt,
+		sdk.RuntimeHealthKeyStreamLastActivityAt:       account.StreamLastActivityAt,
+		sdk.RuntimeHealthKeyStreamLastPingAt:           account.StreamLastPingAt,
+		sdk.RuntimeHealthKeyStreamLastPongAt:           account.StreamLastPongAt,
+		sdk.RuntimeHealthKeyStreamLastEventAt:          account.StreamLastEventAt,
+		sdk.RuntimeHealthKeyStreamLastError:            account.StreamLastError,
+		sdk.RuntimeHealthKeyStreamLastErrorAt:          account.StreamLastErrorAt,
+		sdk.RuntimeHealthKeyStreamReconnectRequestedAt: account.StreamReconnectRequestedAt,
+		sdk.RuntimeHealthKeyStreamReconnectError:       account.StreamReconnectError,
+		sdk.RuntimeHealthKeyStreamReconnectErrorAt:     account.StreamReconnectErrorAt,
+		sdk.RuntimeHealthKeyStreamSessionExpired:       account.StreamSessionExpired,
+		"updated_at":                                   account.UpdatedAt,
 	}
 	if identity := weixinBotIdentityState(account); len(identity) > 0 {
 		out["bot_identity"] = identity
@@ -1011,6 +1037,25 @@ func uniqueStringList(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func timeValue(value any) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return time.Time{}
+		}
+		parsed, _ := time.Parse(time.RFC3339Nano, typed)
+		return parsed
+	case json.RawMessage:
+		var text string
+		if err := json.Unmarshal(typed, &text); err == nil {
+			return timeValue(text)
+		}
+	}
+	return time.Time{}
 }
 
 func stringValue(value any) string {

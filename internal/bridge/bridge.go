@@ -82,6 +82,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 		return err
 	}
 
+	if len(b.options.Accounts) == 1 {
+		return b.runAccount(ctx, b.options.Accounts[0])
+	}
+
 	for _, accountCfg := range b.options.Accounts {
 		accountCfg := accountCfg
 		go func() {
@@ -179,6 +183,7 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 				_ = r.markSessionExpired(ctx, "getupdates session expired")
 				return fmt.Errorf("weixin account %s session expired; run login again: %w", r.account.AccountID, err)
 			}
+			_ = r.markStreamError(ctx, err)
 			r.logger.Printf("getUpdates account=%s error=%v", r.account.AccountID, err)
 			if !sleepOrDone(ctx, r.options.PollInterval) {
 				return ctx.Err()
@@ -187,10 +192,12 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 		}
 
 		r.mu.Lock()
+		now := time.Now().UTC()
 		if resp.GetUpdatesBuf != "" {
 			r.account.GetUpdatesBuf = resp.GetUpdatesBuf
-			_ = r.store.SaveAccount(ctx, r.account)
 		}
+		r.markStreamConnectedLocked(now)
+		_ = r.store.SaveAccount(ctx, r.account)
 		r.mu.Unlock()
 
 		if resp.LongPollingTimeoutMS > 0 {
@@ -277,7 +284,10 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 
 	r.mu.Lock()
 	r.account.PeerSessions[chatKey] = sessionUUID
-	r.account.InboundSeen[key] = time.Now().UTC().Format(time.RFC3339Nano)
+	now := time.Now().UTC()
+	r.account.InboundSeen[key] = now.Format(time.RFC3339Nano)
+	r.account.StreamLastEventAt = now
+	r.account.StreamLastActivityAt = now
 	if msg.ContextToken != "" {
 		r.account.ContextTokens[chatKey] = msg.ContextToken
 	}
@@ -479,11 +489,15 @@ func (r *AccountRunner) streamLoop(ctx context.Context, peerID, sessionUUID stri
 	if reconnect <= 0 {
 		reconnect = 30 * time.Second
 	}
+	attempt := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
+		}
+		if attempt > 0 {
+			_ = r.markStreamReconnecting(ctx)
 		}
 
 		r.mu.Lock()
@@ -503,8 +517,12 @@ func (r *AccountRunner) streamLoop(ctx context.Context, peerID, sessionUUID stri
 			return
 		}
 		if err != nil && streamCtx.Err() == nil {
+			_ = r.markStreamReconnectFailed(ctx, err)
 			r.logger.Printf("beak stream account=%s session=%s error=%v", r.account.AccountID, sessionUUID, err)
+		} else {
+			_ = r.markStreamConnected(ctx)
 		}
+		attempt++
 		if !sleepOrDone(ctx, reconnect) {
 			return
 		}
@@ -683,6 +701,63 @@ func (r *AccountRunner) markSessionExpired(ctx context.Context, reason string) e
 	err := r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	return err
+}
+
+func (r *AccountRunner) markStreamError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	r.mu.Lock()
+	now := time.Now().UTC()
+	r.account.StreamLastError = err.Error()
+	r.account.StreamLastErrorAt = now
+	saveErr := r.store.SaveAccount(ctx, r.account)
+	r.mu.Unlock()
+	return saveErr
+}
+
+func (r *AccountRunner) markStreamReconnecting(ctx context.Context) error {
+	r.mu.Lock()
+	now := time.Now().UTC()
+	r.account.StreamConnectionState = sdk.RuntimeHealthStateReconnecting
+	r.account.StreamReconnectRequestedAt = now
+	saveErr := r.store.SaveAccount(ctx, r.account)
+	r.mu.Unlock()
+	return saveErr
+}
+
+func (r *AccountRunner) markStreamReconnectFailed(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	r.mu.Lock()
+	now := time.Now().UTC()
+	r.account.StreamConnectionState = sdk.RuntimeHealthStateReconnectFailed
+	r.account.StreamReconnectError = err.Error()
+	r.account.StreamReconnectErrorAt = now
+	r.account.StreamLastError = err.Error()
+	r.account.StreamLastErrorAt = now
+	saveErr := r.store.SaveAccount(ctx, r.account)
+	r.mu.Unlock()
+	return saveErr
+}
+
+func (r *AccountRunner) markStreamConnected(ctx context.Context) error {
+	r.mu.Lock()
+	now := time.Now().UTC()
+	r.markStreamConnectedLocked(now)
+	saveErr := r.store.SaveAccount(ctx, r.account)
+	r.mu.Unlock()
+	return saveErr
+}
+
+func (r *AccountRunner) markStreamConnectedLocked(now time.Time) {
+	if r.account.StreamConnectionState != sdk.RuntimeHealthStateConnected || r.account.StreamConnectedAt.IsZero() {
+		r.account.StreamConnectedAt = now
+	}
+	r.account.StreamConnectionState = sdk.RuntimeHealthStateConnected
+	r.account.StreamLastActivityAt = now
+	r.account.StreamSessionExpired = false
 }
 
 func sleepOrDone(ctx context.Context, duration time.Duration) bool {

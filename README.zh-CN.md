@@ -251,6 +251,16 @@ State 不是 credential。Beak host 可以先把它保存在 channel account 上
   "inbound_seen": {},
   "peer_sessions": {},
   "stream_cursors": {},
+  "stream_connection_state": "connected",
+  "stream_connected_at": "2026-06-22T09:00:00Z",
+  "stream_last_activity_at": "2026-06-22T09:00:00Z",
+  "stream_last_event_at": "2026-06-22T09:00:00Z",
+  "stream_last_error": "",
+  "stream_last_error_at": "",
+  "stream_reconnect_requested_at": "",
+  "stream_reconnect_error": "",
+  "stream_reconnect_error_at": "",
+  "stream_session_expired": false,
   "sent_beak_messages": {},
   "bot_identity": {
     "id": "ilink-bot-id",
@@ -266,6 +276,8 @@ State 不是 credential。Beak host 可以先把它保存在 channel account 上
 ```
 
 Connector 通过 `sdk.AccountStore` 更新 state。SDK 不写本地文件。
+
+微信 iLink 属于 SDK-owned polling。成功 `getUpdates` 会写 `stream_connection_state=connected` 和 activity 时间；普通 poll 错误写 `stream_last_error` / `stream_last_error_at` 并继续重试；session 失效写 `stream_connection_state=expired` 和 `stream_session_expired=true`；SDK 自持的 stream reconnect loop 会通过标准 runtime health 字段写 `reconnecting`、`reconnect_failed` 和 `connected`。
 
 `ValidateCredential(ctx, req)` 对微信默认返回 `Valid=true`，因为有效 token 来自已成功的二维码登录。它会优先用 `ilink_user_id` 归一化 `account_id`，并把 `ilink_bot_id` 只作为 bot identity metadata 保存。不要用 `ilink_bot_id` 做 account 去重或 Agent 绑定身份，因为它可能在重复扫码后变化。
 

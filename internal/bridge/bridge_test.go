@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"strings"
@@ -239,6 +240,72 @@ func TestPollMarksSessionExpired(t *testing.T) {
 	if !account.LoginRequired() || account.BotToken != "" || account.GetUpdatesBuf != "" || len(account.ContextTokens) != 0 || len(account.TypingTickets) != 0 {
 		t.Fatalf("account not marked expired: %+v", account)
 	}
+	if account.StreamConnectionState != sdk.RuntimeHealthStateExpired || !account.StreamSessionExpired || account.StreamLastError == "" || account.StreamLastErrorAt.IsZero() {
+		t.Fatalf("runtime health not marked expired: %+v", account)
+	}
+}
+
+func TestPollRecordsTemporaryErrorAndContinues(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1", BotToken: "token-1", GetUpdatesBuf: "buf-1"}
+	account.EnsureMaps()
+	runner := testRunner(store, account)
+	runner.wx.(*fakeWeixin).updatesErrs = []error{errors.New("temporary getupdates failure")}
+	runner.wx.(*fakeWeixin).updates = []*weixin.GetUpdatesResponse{{
+		GetUpdatesBuf: "buf-2",
+		Messages: []weixin.WeixinMessage{{
+			MessageID:    105,
+			FromUserID:   "peer-1",
+			MessageType:  weixin.MessageTypeUser,
+			MessageState: weixin.MessageStateFinish,
+			ContextToken: "ctx-1",
+			ItemList: []weixin.MessageItem{
+				{Type: weixin.MessageItemTypeText, TextItem: &weixin.TextItem{Text: "hello after error"}},
+			},
+		}},
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := runner.Poll(ctx)
+	if err == nil || err != context.DeadlineExceeded {
+		t.Fatalf("Poll should continue until context deadline, got %v", err)
+	}
+	if account.StreamConnectionState != sdk.RuntimeHealthStateConnected || account.StreamConnectedAt.IsZero() || account.StreamLastActivityAt.IsZero() || account.StreamLastEventAt.IsZero() {
+		t.Fatalf("runtime health not marked connected/activity: %+v", account)
+	}
+	if account.StreamLastError == "" || account.StreamLastErrorAt.IsZero() {
+		t.Fatalf("temporary poll error was not recorded: %+v", account)
+	}
+	if account.GetUpdatesBuf != "buf-2" {
+		t.Fatalf("poll did not continue after temporary error: get_updates_buf=%q", account.GetUpdatesBuf)
+	}
+}
+
+func TestStreamRuntimeHealthTransitions(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1"}
+	account.EnsureMaps()
+	runner := testRunner(store, account)
+
+	if err := runner.markStreamReconnecting(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if account.StreamConnectionState != sdk.RuntimeHealthStateReconnecting || account.StreamReconnectRequestedAt.IsZero() {
+		t.Fatalf("runtime health not marked reconnecting: %+v", account)
+	}
+	if err := runner.markStreamReconnectFailed(context.Background(), errors.New("stream failed")); err != nil {
+		t.Fatal(err)
+	}
+	if account.StreamConnectionState != sdk.RuntimeHealthStateReconnectFailed || account.StreamReconnectError == "" || account.StreamReconnectErrorAt.IsZero() {
+		t.Fatalf("runtime health not marked reconnect_failed: %+v", account)
+	}
+	if err := runner.markStreamConnected(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if account.StreamConnectionState != sdk.RuntimeHealthStateConnected || account.StreamConnectedAt.IsZero() || account.StreamLastActivityAt.IsZero() {
+		t.Fatalf("runtime health not marked connected: %+v", account)
+	}
 }
 
 func TestProcessStreamEventMarksSessionExpiredOnSend(t *testing.T) {
@@ -302,7 +369,34 @@ func TestProcessStreamEventSkipsMissingContextAndAdvancesCursor(t *testing.T) {
 	}
 }
 
-func TestBridgeRunKeepsPluginAliveWhenAccountFails(t *testing.T) {
+func TestBridgeRunReturnsSingleAccountFailure(t *testing.T) {
+	options := &Options{
+		WorkspaceRef:        "workspace-1",
+		AgentParticipantID:  "agent:agent-1",
+		BridgeParticipantID: "bridge:weixin",
+		PollInterval:        time.Millisecond,
+		StreamReconnect:     time.Millisecond,
+		Accounts: []AccountConfig{
+			{AccountID: "expired-account"},
+		},
+	}
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "expired-account", BotToken: "token-1", BaseURL: "https://example.test"}
+	account.EnsureMaps()
+	store.accounts[account.AccountID] = account
+	runner := New(options, store, &fakeBeak{}, func(state.AccountState, AccountConfig) WeixinClient {
+		return &fakeWeixin{updatesErr: weixin.ErrSessionExpired}
+	}, log.New(io.Discard, "", 0))
+	err := runner.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "session expired") {
+		t.Fatalf("Run should return single account failure, got %v", err)
+	}
+	if account.StreamConnectionState != sdk.RuntimeHealthStateExpired || !account.StreamSessionExpired {
+		t.Fatalf("runtime health not marked expired: %+v", account)
+	}
+}
+
+func TestBridgeRunKeepsMultiAccountRuntimeAliveWhenOneAccountFails(t *testing.T) {
 	options := &Options{
 		WorkspaceRef:        "workspace-1",
 		AgentParticipantID:  "agent:agent-1",
@@ -311,14 +405,21 @@ func TestBridgeRunKeepsPluginAliveWhenAccountFails(t *testing.T) {
 		StreamReconnect:     time.Millisecond,
 		Accounts: []AccountConfig{
 			{AccountID: "expired-or-unconfigured-account"},
+			{AccountID: "ok-account"},
 		},
 	}
-	runner := New(options, newMemoryStore(), &fakeBeak{}, nil, log.New(io.Discard, "", 0))
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "ok-account", BotToken: "token-1", BaseURL: "https://example.test"}
+	account.EnsureMaps()
+	store.accounts[account.AccountID] = account
+	runner := New(options, store, &fakeBeak{}, func(state.AccountState, AccountConfig) WeixinClient {
+		return &fakeWeixin{}
+	}, log.New(io.Discard, "", 0))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	err := runner.Run(ctx)
 	if err == nil || err != context.DeadlineExceeded {
-		t.Fatalf("Run should stay alive until context deadline, got %v", err)
+		t.Fatalf("multi-account Run should stay alive until context deadline, got %v", err)
 	}
 }
 
@@ -415,10 +516,12 @@ func (f *fakeBeak) StreamEvents(context.Context, string, beak.StreamRequest, fun
 }
 
 type fakeWeixin struct {
-	sent       []sentMessage
-	typing     []typingMessage
-	updatesErr error
-	sendErr    error
+	sent        []sentMessage
+	typing      []typingMessage
+	updatesErr  error
+	updatesErrs []error
+	updates     []*weixin.GetUpdatesResponse
+	sendErr     error
 }
 
 type sentMessage struct {
@@ -436,6 +539,18 @@ type typingMessage struct {
 func (f *fakeWeixin) GetUpdates(context.Context, string, time.Duration) (*weixin.GetUpdatesResponse, error) {
 	if f.updatesErr != nil {
 		return nil, f.updatesErr
+	}
+	if len(f.updatesErrs) > 0 {
+		err := f.updatesErrs[0]
+		f.updatesErrs = f.updatesErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(f.updates) > 0 {
+		resp := f.updates[0]
+		f.updates = f.updates[1:]
+		return resp, nil
 	}
 	return &weixin.GetUpdatesResponse{}, nil
 }
