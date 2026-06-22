@@ -27,6 +27,9 @@ func TestWeixinConnectorMetadataAndSchema(t *testing.T) {
 	if !metadata.Capabilities.Stream || metadata.Capabilities.Webhook {
 		t.Fatalf("stream/webhook capabilities=%+v", metadata.Capabilities)
 	}
+	if len(metadata.Capabilities.AckModes) != 1 || metadata.Capabilities.AckModes[0] != "typing" {
+		t.Fatalf("ack modes=%+v", metadata.Capabilities.AckModes)
+	}
 	if len(metadata.Capabilities.LoginModes) != 1 || metadata.Capabilities.LoginModes[0] != sdk.LoginModeQRCode {
 		t.Fatalf("login modes=%+v", metadata.Capabilities.LoginModes)
 	}
@@ -782,6 +785,213 @@ func TestWeixinConnectorSendMarkdownFallsBackToText(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWeixinConnectorAcknowledgeSendsTyping(t *testing.T) {
+	var sawGetConfig bool
+	var sawTyping bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ilink/bot/getconfig":
+			sawGetConfig = true
+			var body struct {
+				ILinkUserID  string `json:"ilink_user_id"`
+				ContextToken string `json:"context_token"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.ILinkUserID != "group-1" || body.ContextToken != "ctx-group-1" {
+				t.Fatalf("getconfig body=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "typing_ticket": "typing-ticket-1"})
+		case "/ilink/bot/sendtyping":
+			sawTyping = true
+			var body struct {
+				ILinkUserID  string `json:"ilink_user_id"`
+				TypingTicket string `json:"typing_ticket"`
+				Status       int    `json:"status"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.ILinkUserID != "group-1" || body.TypingTicket != "typing-ticket-1" || body.Status != 1 {
+				t.Fatalf("sendtyping body=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewConnector().Acknowledge(context.Background(), sdk.Runtime{
+		Account: sdk.ChannelAccount{
+			UUID:     "account-1",
+			Platform: "weixin",
+			Credential: map[string]any{
+				"account_id": "account-1",
+				"bot_token":  "token-1",
+				"base_url":   server.URL,
+			},
+			State: map[string]any{
+				"context_tokens": map[string]any{
+					"group:group-1": "ctx-group-1",
+				},
+			},
+		},
+	}, sdk.OutboundAck{
+		AccountUUID: "account-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "group-1",
+		Action:      "start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawGetConfig || !sawTyping {
+		t.Fatalf("sawGetConfig=%v sawTyping=%v", sawGetConfig, sawTyping)
+	}
+	if result.Status != "sent" || result.Mode != "typing" || result.Raw["context_key"] != "group:group-1" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestWeixinConnectorAcknowledgeRefreshesExpiredTypingTicket(t *testing.T) {
+	var sendTypingCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ilink/bot/getconfig":
+			var body struct {
+				ILinkUserID  string `json:"ilink_user_id"`
+				ContextToken string `json:"context_token"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.ILinkUserID != "group-1" || body.ContextToken != "ctx-group-1" {
+				t.Fatalf("getconfig body=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0, "typing_ticket": "typing-ticket-new"})
+		case "/ilink/bot/sendtyping":
+			sendTypingCalls++
+			var body struct {
+				ILinkUserID  string `json:"ilink_user_id"`
+				TypingTicket string `json:"typing_ticket"`
+				Status       int    `json:"status"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if sendTypingCalls == 1 {
+				if body.TypingTicket != "typing-ticket-old" {
+					t.Fatalf("first sendtyping body=%+v", body)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"errcode": -14, "errmsg": "session expired"})
+				return
+			}
+			if body.ILinkUserID != "group-1" || body.TypingTicket != "typing-ticket-new" || body.Status != 1 {
+				t.Fatalf("second sendtyping body=%+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewConnector().Acknowledge(context.Background(), sdk.Runtime{
+		Account: sdk.ChannelAccount{
+			UUID:     "account-1",
+			Platform: "weixin",
+			Credential: map[string]any{
+				"account_id": "account-1",
+				"bot_token":  "token-1",
+				"base_url":   server.URL,
+			},
+			State: map[string]any{
+				"context_tokens": map[string]any{
+					"group:group-1": "ctx-group-1",
+				},
+				"typing_tickets": map[string]any{
+					"group:group-1": "typing-ticket-old",
+				},
+			},
+		},
+	}, sdk.OutboundAck{
+		AccountUUID: "account-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "group-1",
+		Action:      "start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sendTypingCalls != 2 || result.Status != "sent" || result.Mode != "typing" {
+		t.Fatalf("sendTypingCalls=%d result=%+v", sendTypingCalls, result)
+	}
+}
+
+func TestWeixinConnectorAcknowledgeSkipsExpiredSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/getconfig" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"errcode": -14, "errmsg": "session expired"})
+	}))
+	defer server.Close()
+
+	result, err := NewConnector().Acknowledge(context.Background(), sdk.Runtime{
+		Account: sdk.ChannelAccount{
+			UUID:     "account-1",
+			Platform: "weixin",
+			Credential: map[string]any{
+				"account_id": "account-1",
+				"bot_token":  "token-1",
+				"base_url":   server.URL,
+			},
+			State: map[string]any{
+				"context_tokens": map[string]any{
+					"group:group-1": "ctx-group-1",
+				},
+			},
+		},
+	}, sdk.OutboundAck{
+		AccountUUID: "account-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "group-1",
+		Action:      "start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "skipped" || result.Mode != "typing" || result.Raw["reason"] != "session_expired" {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestWeixinConnectorAcknowledgeSkipsWithoutContextToken(t *testing.T) {
+	result, err := NewConnector().Acknowledge(context.Background(), sdk.Runtime{
+		Account: sdk.ChannelAccount{
+			UUID:     "account-1",
+			Platform: "weixin",
+			Credential: map[string]any{
+				"account_id": "account-1",
+				"bot_token":  "token-1",
+			},
+		},
+	}, sdk.OutboundAck{
+		AccountUUID: "account-1",
+		ChatType:    sdk.ChatTypeDirect,
+		ChatID:      "user-1",
+		Action:      "start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "skipped" || result.Mode != "typing" || result.Raw["reason"] != "missing_context_token" {
+		t.Fatalf("result=%+v", result)
 	}
 }
 

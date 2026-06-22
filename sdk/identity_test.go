@@ -34,3 +34,28 @@ func TestOutboundMessageCommonFormatContract(t *testing.T) {
 		t.Fatalf("common outbound json=%+v", decoded)
 	}
 }
+
+func TestOutboundAckCommonContract(t *testing.T) {
+	data, err := json.Marshal(OutboundAck{
+		AccountUUID:       "account-1",
+		SessionUUID:       "session-1",
+		SourceMessageUUID: "message-1",
+		ChatType:          ChatTypeGroup,
+		ChatID:            "group-1",
+		TargetMessageID:   "1001",
+		Intent:            "processing",
+		Action:            "start",
+		Mode:              "auto",
+		Emoji:             "thinking",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["target_message_id"] != "1001" || decoded["intent"] != "processing" || decoded["action"] != "start" || decoded["emoji"] != "thinking" {
+		t.Fatalf("common outbound ack json=%+v", decoded)
+	}
+}

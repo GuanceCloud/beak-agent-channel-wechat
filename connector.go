@@ -3,6 +3,7 @@ package beakweixin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ func (c Connector) Metadata() sdk.ConnectorMetadata {
 			Stream:         true,
 			Webhook:        false,
 			BlockStreaming: caps.BlockStreaming,
+			AckModes:       []string{"typing"},
 		},
 	}
 }
@@ -176,6 +178,66 @@ func (c Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbou
 		AccountUUID: result.AccountID,
 		MessageID:   result.MessageID,
 	}, nil
+}
+
+func (c Connector) Acknowledge(ctx context.Context, runtime sdk.Runtime, req sdk.OutboundAck) (*sdk.AckResult, error) {
+	account, err := selectRuntimeAccount(runtime, req.AccountUUID)
+	if err != nil {
+		return nil, err
+	}
+	native, store := c.runtimeFromSDK(runtime, &account)
+	accountID := store.accountID(account)
+	if accountID == "" {
+		return nil, fmt.Errorf("weixin ack account is required")
+	}
+	result := &sdk.AckResult{
+		Platform:    Platform,
+		AccountUUID: accountID,
+		Mode:        "typing",
+		Status:      "skipped",
+	}
+	if !weixinAckWantsTyping(req) {
+		result.Status = "unsupported"
+		return result, nil
+	}
+	status, ok := weixinAckTypingStatus(req)
+	if !ok {
+		return result, nil
+	}
+	accountState, err := store.LoadAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	contextKey := ackStateKey(req)
+	if contextKey == "" {
+		result.Raw = map[string]any{"reason": "missing_chat_id"}
+		return result, nil
+	}
+	contextToken := accountState.ContextTokens[contextKey]
+	if strings.TrimSpace(contextToken) == "" {
+		result.Raw = map[string]any{"reason": "missing_context_token", "context_key": contextKey}
+		return result, nil
+	}
+	chat := weixin.ChatIdentityFromStateKey(contextKey)
+	if strings.TrimSpace(chat.ReplyToUserID) == "" {
+		result.Raw = map[string]any{"reason": "missing_reply_to_user_id", "context_key": contextKey}
+		return result, nil
+	}
+	client := weixin.NewClient(accountState.BaseURL, accountState.BotToken)
+	client.HTTPClient = native.HTTPClient
+	if err := sendWeixinAckTyping(ctx, client, store, accountState, chat.ReplyToUserID, contextKey, contextToken, status); err != nil {
+		if errors.Is(err, weixin.ErrSessionExpired) {
+			result.Raw = map[string]any{"reason": "session_expired", "context_key": contextKey}
+			return result, nil
+		}
+		return nil, err
+	}
+	result.Status = "sent"
+	result.Raw = map[string]any{
+		"context_key": contextKey,
+		"status":      status,
+	}
+	return result, nil
 }
 
 func (Connector) Stop(ctx context.Context, account sdk.ChannelAccount) error {
@@ -531,6 +593,61 @@ func outboundStateKey(req sdk.OutboundMessage) string {
 		return weixin.ChatTypeGroup + ":" + req.ChatID
 	}
 	return req.ChatID
+}
+
+func ackStateKey(req sdk.OutboundAck) string {
+	if req.ChatType == sdk.ChatTypeGroup {
+		return weixin.ChatTypeGroup + ":" + req.ChatID
+	}
+	return req.ChatID
+}
+
+func weixinAckWantsTyping(req sdk.OutboundAck) bool {
+	mode := strings.ToLower(strings.TrimSpace(firstString(req.Mode, req.Raw["mode"])))
+	return mode == "" || mode == "auto" || mode == "typing"
+}
+
+func weixinAckTypingStatus(req sdk.OutboundAck) (int, bool) {
+	action := strings.ToLower(strings.TrimSpace(firstString(req.Action, req.Raw["action"])))
+	switch action {
+	case "", "start", "processing":
+		return weixin.TypingStatusStart, true
+	case "stop", "finish", "finished", "done":
+		return weixin.TypingStatusStop, true
+	default:
+		return 0, false
+	}
+}
+
+func sendWeixinAckTyping(ctx context.Context, client *weixin.Client, store *connectorStateStore, account *AccountState, toUserID, contextKey, contextToken string, status int) error {
+	typingTicket := account.TypingTickets[contextKey]
+	if strings.TrimSpace(typingTicket) == "" {
+		ticket, err := client.GetTypingTicket(ctx, toUserID, contextToken)
+		if err != nil {
+			return err
+		}
+		typingTicket = ticket
+		account.TypingTickets[contextKey] = ticket
+		if err := store.SaveAccount(ctx, account); err != nil {
+			return err
+		}
+	}
+	err := client.SendTyping(ctx, toUserID, typingTicket, status)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, weixin.ErrSessionExpired) {
+		delete(account.TypingTickets, contextKey)
+	}
+	ticket, refreshErr := client.GetTypingTicket(ctx, toUserID, contextToken)
+	if refreshErr != nil {
+		return refreshErr
+	}
+	account.TypingTickets[contextKey] = ticket
+	if saveErr := store.SaveAccount(ctx, account); saveErr != nil {
+		return saveErr
+	}
+	return client.SendTyping(ctx, toUserID, ticket, status)
 }
 
 func weixinOutboundMentionText(req sdk.OutboundMessage) string {

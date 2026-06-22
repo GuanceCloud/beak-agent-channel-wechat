@@ -4,7 +4,7 @@
 
 Go SDK package for connecting Beak Channel Gateway to Weixin bot accounts through Tencent iLink Weixin APIs.
 
-This repository is importable library code. It is not a CLI, does not read user-authored runtime files, does not own persistence, and does not require users to edit server files. The Beak host owns UI, credential persistence, account state persistence, session creation, message writes, outbound agent-message subscription, and runtime packaging. This SDK owns the Weixin connector logic: QR login, iLink update polling, text send, typing status, message dedupe, `context_token` handling, and Weixin-to-Beak message normalization.
+This repository is importable library code. It is not a CLI, does not read user-authored runtime files, does not own persistence, and does not require users to edit server files. The Beak host owns UI, credential persistence, account state persistence, session creation, message writes, outbound agent-message subscription, and runtime packaging. This SDK owns the Weixin connector logic: QR login, iLink update polling, text send, typing acknowledgement, message dedupe, `context_token` handling, and Weixin-to-Beak message normalization.
 
 ## Scope
 
@@ -13,7 +13,7 @@ This repository is importable library code. It is not a CLI, does not read user-
 - Host-backed credential and state persistence.
 - Text-only inbound Weixin messages from `ilink/bot/getupdates` to Beak sessions.
 - Text or markdown-formatted Beak agent output back to Weixin through `connector.Send` / `ilink/bot/sendmessage`; markdown uses the same common fields and falls back to text inside the SDK.
-- Weixin typing status through `getconfig` and `sendtyping`.
+- Lightweight processing acknowledgement through `Acknowledge`; Weixin maps it to typing start/stop through `getconfig` and `sendtyping`.
 - Direct chat and explicit group chat normalization.
 - Standard `bot_identity` state for unified SDK exposure, while account identity remains the stable `ilink_user_id` when available.
 - One connected bot account plus one group chat maps to one Beak session; one connected bot account plus one direct chat maps to one Beak session.
@@ -71,6 +71,7 @@ The Weixin connector metadata is returned from `connector.Metadata()`:
 - text group chat enabled when incoming iLink payloads carry an explicit `group_id`
 - media disabled
 - block streaming disabled
+- ack mode `typing`
 
 The credential schema returned from `connector.CredentialSchema(ctx)` has no user-entered Weixin fields for v1. Weixin account credential is produced by QR login and must be stored by Beak host after successful login.
 
@@ -105,6 +106,8 @@ runtime.Native = beakweixin.Runtime{
 `BotAgent` is sent as iLink `base_info.bot_agent` for upstream observability. It does not change the Weixin QR scan confirmation title; Tencent iLink's public QR login API does not expose a title field.
 
 The common outbound `Format` / `Title` fields are accepted for host-side consistency. Beak host should pass them exactly as it does for Lark and DingTalk; Weixin currently falls back to plain text for `Format="markdown"` inside the SDK because the iLink text path does not expose a markdown renderer.
+
+The common `Acknowledge` method is also host-facing. Beak host should call it when it wants a lightweight processing hint; the SDK maps `Action="start"` and `Action="stop"` to Weixin typing status when the latest chat `context_token` is available.
 
 `sdk.Gateway` is the host runtime contract:
 
@@ -256,6 +259,23 @@ The connector updates state through `sdk.AccountStore`. It does not write local 
 
 `ValidateCredential(ctx, req)` defaults to `Valid=true` for Weixin because successful QR login has already produced the token. It normalizes `account_id` from `ilink_user_id` when present and preserves `ilink_bot_id` only as bot identity metadata. Do not use `ilink_bot_id` as account dedupe or Agent binding identity because it can change across scans.
 
+## Lightweight Acknowledgement
+
+When agent processing may take time, Beak host can call `Acknowledge` immediately after the inbound message is accepted and before starting agent work:
+
+```go
+_, err := connector.Acknowledge(ctx, runtime, sdk.OutboundAck{
+	AccountUUID: accountUUID,
+	ChatType:    sdk.ChatTypeGroup,
+	ChatID:      "group_123",
+	Intent:      "processing",
+	Action:      "start",
+	Mode:        "typing",
+})
+```
+
+For typing status, the SDK looks up the latest `context_token` cached for `ChatType + ChatID`, calls `ilink/bot/getconfig`, then calls `ilink/bot/sendtyping`. Beak host should call `Acknowledge(Action="stop", Mode="typing")` after final message delivery or cancellation. If no context token exists, the SDK returns `Status="skipped"` with no error so the final reply path continues. It never sends a normal text message as an acknowledgement fallback.
+
 ## Session Rules
 
 Gateway session identity is the connected bot account plus platform chat identity. The account dimension is required because the same IM group can contain multiple bot accounts, and each bot connection must have its own Beak session.
@@ -324,9 +344,9 @@ Inbound Weixin text:
 3. Connector skips non-text, incomplete, or duplicate updates.
 4. Connector normalizes chat identity from `group_id` or `from_user_id`.
 5. Connector caches the latest chat `context_token`.
-6. Connector optionally sends Weixin typing status while the Beak agent is processing.
-7. Gateway ensures one Beak session for `weixin:<account_uuid>:<chat_type>:<chat_id>`.
-8. Gateway writes Beak message as sender `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`.
+6. Gateway ensures one Beak session for `weixin:<account_uuid>:<chat_type>:<chat_id>`.
+7. Gateway writes Beak message as sender `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`.
+8. Beak host may call `connector.Acknowledge(Action="start", Mode="typing")` before triggering long agent work.
 
 Outbound Beak agent text:
 
@@ -335,7 +355,7 @@ Outbound Beak agent text:
 3. Beak host calls `connector.Send(ctx, runtime, outbound)`.
 4. Connector calls `ilink/bot/sendmessage` with chat id and cached `context_token`.
 5. Connector splits long text into compatible chunks before sending.
-6. Connector sends typing stop after successful delivery when typing was enabled.
+6. Beak host calls `connector.Acknowledge(Action="stop", Mode="typing")` after final delivery when typing was started.
 
 The legacy bridge adapter can still consume Beak stream events directly and stores `stream_cursors` / `sent_beak_messages` for that mode. New host integrations should keep outbound ownership in Beak host and use `connector.Send`.
 

@@ -4,7 +4,7 @@
 
 这是一个 Go SDK 包，用于把 Beak Channel Gateway 接入微信 bot account，并通过 Tencent iLink Weixin APIs 完成扫码登录、消息接收和消息发送。
 
-本仓库提供的是可被 Beak host `import` 的库代码，不是命令行工具。SDK 不读取用户编写的运行时配置文件，不维护本地状态目录，不拥有数据库持久化，也不要求用户登录服务器修改文件。Beak host 负责客户端 UI、credential 持久化、account state 持久化、session 创建、message 写入、agent 出站消息订阅和 connector runtime 打包。SDK 只负责微信 connector 逻辑：二维码登录、iLink update 轮询、文本发送、typing 状态、消息去重、`context_token` 处理，以及把微信消息标准化为 Beak Gateway 能理解的消息。
+本仓库提供的是可被 Beak host `import` 的库代码，不是命令行工具。SDK 不读取用户编写的运行时配置文件，不维护本地状态目录，不拥有数据库持久化，也不要求用户登录服务器修改文件。Beak host 负责客户端 UI、credential 持久化、account state 持久化、session 创建、message 写入、agent 出站消息订阅和 connector runtime 打包。SDK 只负责微信 connector 逻辑：二维码登录、iLink update 轮询、文本发送、typing 轻量确认、消息去重、`context_token` 处理，以及把微信消息标准化为 Beak Gateway 能理解的消息。
 
 ## 范围
 
@@ -15,7 +15,7 @@ v1 支持：
 - 由 Beak host 保存 credential 和 connector state。
 - `ilink/bot/getupdates` 中的微信文本消息入站到 Beak session。
 - Beak agent 文本或 markdown 格式输出通过 `connector.Send` / `ilink/bot/sendmessage` 回发到微信；markdown 使用同一组通用字段，并在 SDK 内退化为 text。
-- 通过 `getconfig` 和 `sendtyping` 发送微信 typing 状态。
+- 通过 `Acknowledge` 提供处理中轻量确认；微信会把它映射为 `getconfig` 和 `sendtyping` 的 typing start/stop。
 - 单聊和显式群聊标准化。
 - 标准 `bot_identity` state 用于统一 SDK 暴露；账号身份仍优先使用稳定的 `ilink_user_id`。
 - 一个已连接 bot account 中的一个群聊对应一个 Beak session。
@@ -79,6 +79,7 @@ func WeixinConnector() sdk.Connector {
 - 当 iLink 入站 payload 有明确 `group_id` 时支持文本群聊
 - 不支持媒体
 - 不支持 block streaming
+- ACK mode 为 `typing`
 
 `connector.CredentialSchema(ctx)` 在 v1 中没有需要用户手动填写的微信字段。微信 account credential 来自二维码登录成功后的返回值，并由 Beak host 加密保存。
 
@@ -113,6 +114,8 @@ runtime.Native = beakweixin.Runtime{
 `BotAgent` 会作为 iLink `base_info.bot_agent` 发送给上游，用于可观测性标识。它不会改变微信扫码确认页的标题；Tencent iLink 公开的二维码登录 API 没有暴露标题字段。
 
 通用出站字段 `Format` / `Title` 会被接受，便于 Beak host 统一建模。Beak host 应该像飞书和钉钉一样原样传入这些字段；当前微信 iLink 文本发送路径没有暴露 markdown renderer，所以 `Format="markdown"` 会在 SDK 内退化为普通 text 发送。
+
+通用 `Acknowledge` 方法也由 Beak host 调用。Host 需要轻量处理中提示时调用它；SDK 会在最近的 chat `context_token` 可用时，把 `Action="start"` 和 `Action="stop"` 映射成微信 typing 状态。
 
 `sdk.Gateway` 是 Beak host 需要实现的运行时接口：
 
@@ -266,6 +269,23 @@ Connector 通过 `sdk.AccountStore` 更新 state。SDK 不写本地文件。
 
 `ValidateCredential(ctx, req)` 对微信默认返回 `Valid=true`，因为有效 token 来自已成功的二维码登录。它会优先用 `ilink_user_id` 归一化 `account_id`，并把 `ilink_bot_id` 只作为 bot identity metadata 保存。不要用 `ilink_bot_id` 做 account 去重或 Agent 绑定身份，因为它可能在重复扫码后变化。
 
+## 轻量确认 Acknowledge
+
+如果 Agent 处理可能耗时，Beak host 可以在入站消息被接受后、启动 Agent 前立即调用 `Acknowledge`：
+
+```go
+_, err := connector.Acknowledge(ctx, runtime, sdk.OutboundAck{
+	AccountUUID: accountUUID,
+	ChatType:    sdk.ChatTypeGroup,
+	ChatID:      "group_123",
+	Intent:      "processing",
+	Action:      "start",
+	Mode:        "typing",
+})
+```
+
+typing 状态下，SDK 会根据 `ChatType + ChatID` 找最近缓存的 `context_token`，先调 `ilink/bot/getconfig`，再调 `ilink/bot/sendtyping`。Beak host 应在最终消息投递完成或取消后调用 `Acknowledge(Action="stop", Mode="typing")`。如果没有上下文 token，SDK 返回 `Status="skipped"` 且不报错，最终回复链路继续执行。SDK 不会用普通文本消息做 ACK fallback。
+
 ## Session 规则
 
 Gateway session identity 必须包含已连接 bot account 和 IM 平台 chat identity。必须包含 account 维度，因为同一个 IM 群可能同时存在多个 bot account，而每个 bot 连接都应该有自己的 Beak session。
@@ -334,9 +354,9 @@ bridge:weixin
 3. Connector 跳过非文本、不完整或重复 update。
 4. Connector 从 `group_id` 或 `from_user_id` 标准化 chat identity。
 5. Connector 缓存最新 chat `context_token`。
-6. Connector 在 Beak agent 处理期间按需发送微信 typing 状态。
-7. Gateway 确保存在 `weixin:<account_uuid>:<chat_type>:<chat_id>` 对应的 Beak session。
-8. Gateway 写入 Beak message，sender 为 `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`。
+6. Gateway 确保存在 `weixin:<account_uuid>:<chat_type>:<chat_id>` 对应的 Beak session。
+7. Gateway 写入 Beak message，sender 为 `im:weixin:<chat_type>:<chat_id>:user:<sender_id>`。
+8. Beak host 可以在触发耗时 Agent 前调用 `connector.Acknowledge(Action="start", Mode="typing")`。
 
 Beak agent 文本出站：
 
@@ -345,7 +365,7 @@ Beak agent 文本出站：
 3. Beak host 调用 `connector.Send(ctx, runtime, outbound)`。
 4. Connector 调用 `ilink/bot/sendmessage`，并带上 chat id 和缓存的 `context_token`。
 5. Connector 发送前会把超长文本切成兼容微信的多条消息。
-6. 如果启用了 typing，Connector 在成功投递后发送 typing stop。
+6. 如果启动过 typing，Beak host 在最终投递完成后调用 `connector.Acknowledge(Action="stop", Mode="typing")`。
 
 旧 bridge adapter 仍可直接消费 Beak stream events，并在该模式下维护 `stream_cursors` / `sent_beak_messages`。新的 host 接入应把出站归属放在 Beak host，然后调用 `connector.Send`。
 
