@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -130,6 +131,52 @@ func TestChannelPollLoginUsesStableWeixinUserID(t *testing.T) {
 	}
 }
 
+func TestChannelPollLoginTreatsClientTimeoutAsWait(t *testing.T) {
+	client, err := New(Options{
+		State: newMemoryStore(),
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, &url.Error{Op: "Get", URL: r.URL.String(), Err: context.DeadlineExceeded}
+		})},
+	}, withWeixinForTest(bridge.WeixinOptions{
+		BaseURL:         "https://ilinkai.weixin.qq.com",
+		RequestTimeout:  time.Second,
+		LongPollTimeout: time.Second,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := client.PollLogin(context.Background(), "qr-timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "wait" || status.Confirmed || status.Expired {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestChannelPollLoginDoesNotHideParentCancellation(t *testing.T) {
+	client, err := New(Options{
+		State: newMemoryStore(),
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, &url.Error{Op: "Get", URL: r.URL.String(), Err: context.DeadlineExceeded}
+		})},
+	}, withWeixinForTest(bridge.WeixinOptions{
+		BaseURL:         "https://ilinkai.weixin.qq.com",
+		RequestTimeout:  time.Second,
+		LongPollTimeout: time.Second,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.PollLogin(ctx, "qr-cancelled"); err == nil {
+		t.Fatal("expected parent context cancellation error")
+	}
+}
+
 func withWeixinForTest(wxCfg bridge.WeixinOptions) Option {
 	return func(client *Client) {
 		client.weixin = wxCfg
@@ -211,6 +258,12 @@ func TestChannelSendTextUsesStoredAccountAndContextToken(t *testing.T) {
 	if result.Channel != "weixin" || result.AccountID != "account-1" {
 		t.Fatalf("result=%+v", result)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 type fakeRuntime struct{}

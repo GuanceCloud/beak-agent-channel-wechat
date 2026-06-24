@@ -3,8 +3,10 @@ package channel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -265,7 +267,7 @@ func (c *Client) PollLogin(ctx context.Context, qrcode string) (*LoginStatus, er
 	status, err := wxClient.GetQRCodeStatus(statusCtx, qrcode)
 	statusCancel()
 	if err != nil {
-		if statusCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+		if ctx.Err() == nil && (statusCtx.Err() == context.DeadlineExceeded || isTemporaryLoginPollTimeout(err)) {
 			return &LoginStatus{Status: "wait"}, nil
 		}
 		return nil, err
@@ -288,6 +290,17 @@ func (c *Client) PollLogin(ctx context.Context, qrcode string) (*LoginStatus, er
 		out.Expired = true
 	}
 	return out, nil
+}
+
+func isTemporaryLoginPollTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func stableWeixinAccountID(ilinkUserID, ilinkBotID string) string {
