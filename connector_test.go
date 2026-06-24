@@ -16,6 +16,9 @@ import (
 
 func TestWeixinConnectorMetadataAndSchema(t *testing.T) {
 	var connector sdk.Connector = NewConnector()
+	if _, ok := connector.(sdk.HostStreamConnector); ok {
+		t.Fatal("NewConnector must not expose HostStreamConnector for SDK-owned Weixin runtime")
+	}
 
 	metadata := connector.Metadata()
 	if metadata.ID != ID || metadata.Platform != Platform || metadata.Label != "Weixin" {
@@ -26,6 +29,9 @@ func TestWeixinConnectorMetadataAndSchema(t *testing.T) {
 	}
 	if !metadata.Capabilities.Stream || metadata.Capabilities.Webhook {
 		t.Fatalf("stream/webhook capabilities=%+v", metadata.Capabilities)
+	}
+	if metadata.Capabilities.RuntimeOwnership != sdk.RuntimeOwnershipSDKOwned {
+		t.Fatalf("runtime ownership=%q, want %q", metadata.Capabilities.RuntimeOwnership, sdk.RuntimeOwnershipSDKOwned)
 	}
 	if len(metadata.Capabilities.AckModes) != 1 || metadata.Capabilities.AckModes[0] != "typing" {
 		t.Fatalf("ack modes=%+v", metadata.Capabilities.AckModes)
