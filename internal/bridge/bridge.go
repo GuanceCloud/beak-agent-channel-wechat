@@ -504,23 +504,22 @@ func (r *AccountRunner) streamLoop(ctx context.Context, peerID, sessionUUID stri
 		lastEventUUID := r.account.StreamCursors[sessionUUID]
 		r.mu.Unlock()
 
-		streamCtx, cancel := context.WithTimeout(ctx, reconnect)
-		err := r.beak.StreamEvents(streamCtx, sessionUUID, beak.StreamRequest{
+		err := r.beak.StreamEvents(ctx, sessionUUID, beak.StreamRequest{
 			WorkspaceUUID: r.options.WorkspaceRef,
 			SubscriberID:  r.options.BridgeParticipantID,
 			LastEventUUID: lastEventUUID,
 		}, func(event beak.StreamEvent) error {
 			return r.ProcessStreamEvent(ctx, peerID, event)
 		})
-		cancel()
 		if ctx.Err() != nil {
 			return
 		}
-		if err != nil && streamCtx.Err() == nil {
+		if err != nil {
 			_ = r.markStreamReconnectFailed(ctx, err)
 			r.logger.Printf("beak stream account=%s session=%s error=%v", r.account.AccountID, sessionUUID, err)
 		} else {
-			_ = r.markStreamConnected(ctx)
+			_ = r.markStreamDisconnectedForReconnect(ctx)
+			r.logger.Printf("beak stream account=%s session=%s ended; reconnecting", r.account.AccountID, sessionUUID)
 		}
 		attempt++
 		if !sleepOrDone(ctx, reconnect) {
@@ -531,6 +530,7 @@ func (r *AccountRunner) streamLoop(ctx context.Context, peerID, sessionUUID stri
 
 func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, event beak.StreamEvent) error {
 	if event.EventType == "heartbeat" || event.EventType == "" {
+		r.markStreamConnectedBestEffort(ctx, event)
 		return nil
 	}
 	if event.EventType == "error" {
@@ -541,6 +541,7 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 	if event.EventType == "message" && err != nil {
 		return err
 	}
+	r.markStreamConnectedBestEffort(ctx, event)
 
 	r.mu.Lock()
 	sessionUUID := event.SessionUUID
@@ -726,6 +727,17 @@ func (r *AccountRunner) markStreamReconnecting(ctx context.Context) error {
 	return saveErr
 }
 
+func (r *AccountRunner) markStreamDisconnectedForReconnect(ctx context.Context) error {
+	r.mu.Lock()
+	now := time.Now().UTC()
+	r.account.StreamConnectionState = sdk.RuntimeHealthStateReconnecting
+	r.account.StreamDisconnectedAt = now
+	r.account.StreamReconnectRequestedAt = now
+	saveErr := r.store.SaveAccount(ctx, r.account)
+	r.mu.Unlock()
+	return saveErr
+}
+
 func (r *AccountRunner) markStreamReconnectFailed(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
@@ -733,6 +745,7 @@ func (r *AccountRunner) markStreamReconnectFailed(ctx context.Context, err error
 	r.mu.Lock()
 	now := time.Now().UTC()
 	r.account.StreamConnectionState = sdk.RuntimeHealthStateReconnectFailed
+	r.account.StreamDisconnectedAt = now
 	r.account.StreamReconnectError = err.Error()
 	r.account.StreamReconnectErrorAt = now
 	r.account.StreamLastError = err.Error()
@@ -740,6 +753,12 @@ func (r *AccountRunner) markStreamReconnectFailed(ctx context.Context, err error
 	saveErr := r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	return saveErr
+}
+
+func (r *AccountRunner) markStreamConnectedBestEffort(ctx context.Context, event beak.StreamEvent) {
+	if err := r.markStreamConnected(ctx); err != nil {
+		r.logger.Printf("mark stream connected account=%s event=%s error=%v", r.account.AccountID, event.EventUUID, err)
+	}
 }
 
 func (r *AccountRunner) markStreamConnected(ctx context.Context) error {
@@ -757,6 +776,9 @@ func (r *AccountRunner) markStreamConnectedLocked(now time.Time) {
 	}
 	r.account.StreamConnectionState = sdk.RuntimeHealthStateConnected
 	r.account.StreamLastActivityAt = now
+	r.account.StreamReconnectRequestedAt = time.Time{}
+	r.account.StreamReconnectError = ""
+	r.account.StreamReconnectErrorAt = time.Time{}
 	r.account.StreamSessionExpired = false
 }
 

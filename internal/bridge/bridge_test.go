@@ -224,6 +224,38 @@ func TestProcessStreamEventSendsAgentMessageOnceAndStoresCursor(t *testing.T) {
 	}
 }
 
+func TestProcessStreamEventIgnoresConnectedHealthSaveFailure(t *testing.T) {
+	store := newMemoryStore()
+	store.saveErrs = []error{errors.New("temporary state failure")}
+	account := &state.AccountState{AccountID: "account-1"}
+	account.EnsureMaps()
+	account.ContextTokens["peer-1"] = "ctx-1"
+	account.PeerSessions["peer-1"] = "sess-1"
+	runner := testRunner(store, account)
+
+	payload, _ := json.Marshal(beak.MessageEventPayload{
+		MessageUUID: "msg-1",
+		SenderID:    "agent:agent-1",
+		Content:     "reply",
+	})
+	err := runner.ProcessStreamEvent(context.Background(), "peer-1", beak.StreamEvent{
+		EventUUID:   "evt-1",
+		SessionUUID: "sess-1",
+		EventType:   "message",
+		Payload:     payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wx := runner.wx.(*fakeWeixin)
+	if len(wx.sent) != 1 {
+		t.Fatalf("sent=%d", len(wx.sent))
+	}
+	if account.StreamCursors["sess-1"] != "evt-1" {
+		t.Fatalf("cursor=%q", account.StreamCursors["sess-1"])
+	}
+}
+
 func TestPollMarksSessionExpired(t *testing.T) {
 	store := newMemoryStore()
 	account := &state.AccountState{AccountID: "account-1", BotToken: "token-1", GetUpdatesBuf: "buf-1"}
@@ -250,6 +282,7 @@ func TestPollRecordsTemporaryErrorAndContinues(t *testing.T) {
 	account := &state.AccountState{AccountID: "account-1", BotToken: "token-1", GetUpdatesBuf: "buf-1"}
 	account.EnsureMaps()
 	runner := testRunner(store, account)
+	runner.beak.(*fakeBeak).streamBlock = make(chan struct{})
 	runner.wx.(*fakeWeixin).updatesErrs = []error{errors.New("temporary getupdates failure")}
 	runner.wx.(*fakeWeixin).updates = []*weixin.GetUpdatesResponse{{
 		GetUpdatesBuf: "buf-2",
@@ -294,6 +327,23 @@ func TestStreamRuntimeHealthTransitions(t *testing.T) {
 	if account.StreamConnectionState != sdk.RuntimeHealthStateReconnecting || account.StreamReconnectRequestedAt.IsZero() {
 		t.Fatalf("runtime health not marked reconnecting: %+v", account)
 	}
+	if !account.StreamDisconnectedAt.IsZero() {
+		t.Fatalf("retry marker should not set disconnected_at: %+v", account)
+	}
+	if err := runner.markStreamDisconnectedForReconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	disconnectedAt := account.StreamDisconnectedAt
+	if account.StreamConnectionState != sdk.RuntimeHealthStateReconnecting || disconnectedAt.IsZero() {
+		t.Fatalf("runtime health not marked disconnected reconnecting: %+v", account)
+	}
+	time.Sleep(time.Millisecond)
+	if err := runner.markStreamReconnecting(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !account.StreamDisconnectedAt.Equal(disconnectedAt) {
+		t.Fatalf("retry marker updated disconnected_at: before=%v after=%v", disconnectedAt, account.StreamDisconnectedAt)
+	}
 	if err := runner.markStreamReconnectFailed(context.Background(), errors.New("stream failed")); err != nil {
 		t.Fatal(err)
 	}
@@ -305,6 +355,112 @@ func TestStreamRuntimeHealthTransitions(t *testing.T) {
 	}
 	if account.StreamConnectionState != sdk.RuntimeHealthStateConnected || account.StreamConnectedAt.IsZero() || account.StreamLastActivityAt.IsZero() {
 		t.Fatalf("runtime health not marked connected: %+v", account)
+	}
+	if !account.StreamReconnectRequestedAt.IsZero() || account.StreamReconnectError != "" || !account.StreamReconnectErrorAt.IsZero() {
+		t.Fatalf("runtime health kept stale reconnect error after recovery: %+v", account)
+	}
+}
+
+func TestStreamLoopDoesNotTimeoutHealthyStream(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1"}
+	account.EnsureMaps()
+	runner := testRunner(store, account)
+	runner.options.StreamReconnect = 5 * time.Millisecond
+	started := make(chan struct{})
+	runner.beak = &fakeBeak{
+		streamStarted: started,
+		streamBlock:   make(chan struct{}),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runner.streamLoop(ctx, "peer-1", "sess-1")
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		cancel()
+		t.Fatal("stream did not start")
+	}
+	time.Sleep(25 * time.Millisecond)
+	if got := runner.beak.(*fakeBeak).streamCallCount(); got != 1 {
+		cancel()
+		t.Fatalf("healthy stream was restarted by reconnect interval: calls=%d", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("stream loop did not stop after parent context cancel")
+	}
+}
+
+func TestStreamLoopMarksEOFAsReconnecting(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1"}
+	account.EnsureMaps()
+	runner := testRunner(store, account)
+	runner.options.StreamReconnect = 200 * time.Millisecond
+	runner.beak = &fakeBeak{
+		streamResults: []error{nil},
+		streamBlock:   make(chan struct{}),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runner.streamLoop(ctx, "peer-1", "sess-1")
+	}()
+	waitForCondition(t, 100*time.Millisecond, func() bool {
+		runner.mu.Lock()
+		defer runner.mu.Unlock()
+		return account.StreamConnectionState != ""
+	})
+	runner.mu.Lock()
+	connectionState := account.StreamConnectionState
+	disconnectedAt := account.StreamDisconnectedAt
+	runner.mu.Unlock()
+	if connectionState != sdk.RuntimeHealthStateReconnecting || disconnectedAt.IsZero() {
+		cancel()
+		t.Fatalf("clean stream EOF should move to reconnecting, state=%q disconnected_at=%v", connectionState, disconnectedAt)
+	}
+	if got := runner.beak.(*fakeBeak).streamCallCount(); got != 1 {
+		cancel()
+		t.Fatalf("stream should still be in backoff before reconnect, calls=%d", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("stream loop did not stop after parent context cancel")
+	}
+}
+
+func TestProcessStreamHeartbeatMarksConnected(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{
+		AccountID:                  "account-1",
+		StreamConnectionState:      sdk.RuntimeHealthStateReconnectFailed,
+		StreamReconnectRequestedAt: time.Now().UTC(),
+		StreamReconnectError:       "stream failed",
+		StreamReconnectErrorAt:     time.Now().UTC(),
+	}
+	account.EnsureMaps()
+	runner := testRunner(store, account)
+
+	if err := runner.ProcessStreamEvent(context.Background(), "peer-1", beak.StreamEvent{EventType: "heartbeat"}); err != nil {
+		t.Fatal(err)
+	}
+	if account.StreamConnectionState != sdk.RuntimeHealthStateConnected || account.StreamLastActivityAt.IsZero() {
+		t.Fatalf("heartbeat did not mark stream connected: %+v", account)
+	}
+	if !account.StreamReconnectRequestedAt.IsZero() || account.StreamReconnectError != "" || !account.StreamReconnectErrorAt.IsZero() {
+		t.Fatalf("heartbeat kept stale reconnect error after recovery: %+v", account)
 	}
 }
 
@@ -446,17 +602,37 @@ func testRunner(store *memoryStore, account *state.AccountState) *AccountRunner 
 	}
 }
 
+func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition was not met before timeout")
+}
+
 type fakeBeak struct {
 	ensureCalls     int
 	lastChatType    string
 	lastChatID      string
 	lastSenderID    string
 	createdMessages []beak.CreateMessageRequest
+	streamMu        sync.Mutex
+	streamCalls     int
+	streamStarted   chan struct{}
+	streamStartOnce sync.Once
+	streamBlock     <-chan struct{}
+	streamResults   []error
+	streamEvents    []beak.StreamEvent
 }
 
 type memoryStore struct {
 	mu       sync.Mutex
 	accounts map[string]*state.AccountState
+	saveErrs []error
 }
 
 func newMemoryStore() *memoryStore {
@@ -478,6 +654,11 @@ func (s *memoryStore) LoadAccount(ctx context.Context, accountID string) (*state
 func (s *memoryStore) SaveAccount(ctx context.Context, account *state.AccountState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.saveErrs) > 0 {
+		err := s.saveErrs[0]
+		s.saveErrs = s.saveErrs[1:]
+		return err
+	}
 	if err := state.TouchAccount(account); err != nil {
 		return err
 	}
@@ -511,8 +692,50 @@ func (f *fakeBeak) CreateMessage(_ context.Context, _ string, req beak.CreateMes
 	return &beak.CreateMessageResponse{MessageUUID: "beak-msg-1"}, nil
 }
 
-func (f *fakeBeak) StreamEvents(context.Context, string, beak.StreamRequest, func(beak.StreamEvent) error) error {
+func (f *fakeBeak) StreamEvents(ctx context.Context, _ string, _ beak.StreamRequest, handle func(beak.StreamEvent) error) error {
+	f.streamMu.Lock()
+	f.streamCalls++
+	var result error
+	resultSet := false
+	if len(f.streamResults) > 0 {
+		result = f.streamResults[0]
+		f.streamResults = f.streamResults[1:]
+		resultSet = true
+	}
+	events := append([]beak.StreamEvent(nil), f.streamEvents...)
+	started := f.streamStarted
+	block := f.streamBlock
+	f.streamMu.Unlock()
+
+	if started != nil {
+		f.streamStartOnce.Do(func() { close(started) })
+	}
+	for _, event := range events {
+		if handle == nil {
+			continue
+		}
+		if err := handle(event); err != nil {
+			return err
+		}
+	}
+	if resultSet {
+		return result
+	}
+	if block != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-block:
+			return nil
+		}
+	}
 	return nil
+}
+
+func (f *fakeBeak) streamCallCount() int {
+	f.streamMu.Lock()
+	defer f.streamMu.Unlock()
+	return f.streamCalls
 }
 
 type fakeWeixin struct {
