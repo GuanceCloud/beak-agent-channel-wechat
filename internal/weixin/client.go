@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -102,9 +104,9 @@ func (c *Client) GetUpdates(ctx context.Context, getUpdatesBuf string, timeout t
 		BaseInfo:      c.baseInfo(),
 	}
 	var resp GetUpdatesResponse
-	err := c.doPOST(reqCtx, "ilink/bot/getupdates", body, &resp)
+	err := c.doPOSTWithClient(reqCtx, "ilink/bot/getupdates", body, &resp, c.longPollHTTPClient(timeout))
 	if err != nil {
-		if reqCtx.Err() != nil {
+		if reqCtx.Err() != nil || isTimeoutError(err) {
 			return &GetUpdatesResponse{Ret: 0, Messages: nil, GetUpdatesBuf: getUpdatesBuf}, nil
 		}
 		return nil, err
@@ -288,6 +290,10 @@ func (c *Client) doGET(ctx context.Context, endpoint string, out any) error {
 }
 
 func (c *Client) doPOST(ctx context.Context, endpoint string, body any, out any) error {
+	return c.doPOSTWithClient(ctx, endpoint, body, out, c.HTTPClient)
+}
+
+func (c *Client) doPOSTWithClient(ctx context.Context, endpoint string, body any, out any, client *http.Client) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("encode request: %w", err)
@@ -299,11 +305,14 @@ func (c *Client) doPOST(ctx context.Context, endpoint string, body any, out any)
 	for key, value := range c.commonHeaders(true) {
 		req.Header.Set(key, value)
 	}
-	return c.do(req, out)
+	return c.doWithClient(req, out, client)
 }
 
 func (c *Client) do(req *http.Request, out any) error {
-	client := c.HTTPClient
+	return c.doWithClient(req, out, c.HTTPClient)
+}
+
+func (c *Client) doWithClient(req *http.Request, out any, client *http.Client) error {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -326,6 +335,34 @@ func (c *Client) do(req *http.Request, out any) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) longPollHTTPClient(timeout time.Duration) *http.Client {
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	if timeout <= 0 {
+		timeout = defaultLongPoll
+	}
+	minClientTimeout := timeout + time.Second
+	if client.Timeout > 0 && client.Timeout <= minClientTimeout {
+		clone := *client
+		clone.Timeout = minClientTimeout
+		return &clone
+	}
+	return client
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (c *Client) endpoint(endpoint string) string {

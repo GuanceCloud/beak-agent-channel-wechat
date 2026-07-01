@@ -54,6 +54,24 @@ func TestGetUpdatesBuildsIlinkRequest(t *testing.T) {
 	}
 }
 
+func TestGetUpdatesExtendsShortHTTPClientTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(GetUpdatesResponse{Ret: 0, GetUpdatesBuf: "buf-2"})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token-1")
+	client.HTTPClient = &http.Client{Timeout: 5 * time.Millisecond}
+	resp, err := client.GetUpdates(context.Background(), "buf-1", 100*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetUpdatesBuf != "buf-2" {
+		t.Fatalf("GetUpdatesBuf=%q", resp.GetUpdatesBuf)
+	}
+}
+
 func TestSendTextBuildsMessageRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ilink/bot/sendmessage" {
