@@ -42,6 +42,11 @@ type AccountState struct {
 	StreamReconnectError       string            `json:"stream_reconnect_error,omitempty"`
 	StreamReconnectErrorAt     time.Time         `json:"stream_reconnect_error_at,omitempty"`
 	StreamSessionExpired       bool              `json:"stream_session_expired,omitempty"`
+	StreamSessionExpiredAt     time.Time         `json:"stream_session_expired_at,omitempty"`
+	StreamSessionExpiredReason string            `json:"stream_session_expired_reason,omitempty"`
+	StreamSessionExpiredCode   int               `json:"stream_session_expired_code,omitempty"`
+	StreamSessionExpiredMsg    string            `json:"stream_session_expired_msg,omitempty"`
+	StreamSessionExpiredOp     string            `json:"stream_session_expired_operation,omitempty"`
 	UpdatedAt                  time.Time         `json:"updated_at"`
 }
 
@@ -74,6 +79,10 @@ func (a *AccountState) LoginRequired() bool {
 }
 
 func (a *AccountState) MarkLoginRequired(reason string) {
+	a.MarkLoginRequiredWithDetails(reason, "", 0, "")
+}
+
+func (a *AccountState) MarkLoginRequiredWithDetails(reason, operation string, errCode int, errMsg string) {
 	if a == nil {
 		return
 	}
@@ -85,6 +94,11 @@ func (a *AccountState) MarkLoginRequired(reason string) {
 	a.StreamLastError = reason
 	a.StreamLastErrorAt = now
 	a.StreamSessionExpired = true
+	a.StreamSessionExpiredAt = now
+	a.StreamSessionExpiredReason = reason
+	a.StreamSessionExpiredOp = operation
+	a.StreamSessionExpiredCode = errCode
+	a.StreamSessionExpiredMsg = errMsg
 	a.BotToken = ""
 	a.GetUpdatesBuf = ""
 	a.ContextTokens = make(map[string]string)
@@ -112,6 +126,11 @@ func (a *AccountState) MarkActive() {
 	a.StreamReconnectRequestedAt = time.Time{}
 	a.StreamReconnectError = ""
 	a.StreamReconnectErrorAt = time.Time{}
+	a.StreamSessionExpiredAt = time.Time{}
+	a.StreamSessionExpiredReason = ""
+	a.StreamSessionExpiredOp = ""
+	a.StreamSessionExpiredCode = 0
+	a.StreamSessionExpiredMsg = ""
 	a.GetUpdatesBuf = ""
 	a.ContextTokens = make(map[string]string)
 	a.TypingTickets = make(map[string]string)

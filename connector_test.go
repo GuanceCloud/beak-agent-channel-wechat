@@ -160,6 +160,83 @@ func TestWeixinConnectorQRCodeLoginThroughSDK(t *testing.T) {
 	}
 }
 
+func TestWeixinConnectorPollLoginClearsExpiredStateForExistingAccount(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/get_qrcode_status" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("qrcode"); got != "qr-relogin" {
+			t.Fatalf("qrcode=%q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":        "confirmed",
+			"bot_token":     "token-new",
+			"ilink_bot_id":  "bot-new",
+			"ilink_user_id": "ilink-user-stable",
+			"baseurl":       server.URL,
+		})
+	}))
+	defer server.Close()
+
+	targetURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient := &http.Client{Transport: rewriteTransport{target: targetURL, base: http.DefaultTransport}}
+	connector := NewConnector()
+	runtime := sdk.Runtime{
+		HTTPClient: httpClient,
+		Account: sdk.ChannelAccount{
+			UUID:     "acct-existing",
+			Platform: Platform,
+			Credential: map[string]any{
+				"account_id":    "ilink-user-stable",
+				"bot_token":     "token-old",
+				"base_url":      server.URL,
+				"ilink_user_id": "ilink-user-stable",
+				"ilink_bot_id":  "bot-old",
+			},
+			State: map[string]any{
+				"status":     "login_required",
+				"last_error": "getupdates session expired",
+				sdk.RuntimeHealthKeyStreamConnectionState: sdk.RuntimeHealthStateExpired,
+				sdk.RuntimeHealthKeyStreamLastError:       "getupdates session expired",
+				sdk.RuntimeHealthKeyStreamSessionExpired:  true,
+				"stream_session_expired_reason":           "getupdates session expired",
+				"stream_session_expired_operation":        "getupdates",
+				"stream_session_expired_code":             -14,
+				"stream_session_expired_msg":              "session timeout",
+			},
+		},
+	}
+
+	status, err := connector.PollLogin(context.Background(), sdk.LoginPollRequest{
+		WorkspaceUUID: "workspace-1",
+		ChannelUUID:   "channel-1",
+		ChallengeCode: "qr-relogin",
+		Runtime:       runtime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Confirmed || status.Account.UUID != "acct-existing" {
+		t.Fatalf("status=%+v", status)
+	}
+	if status.Credential["account_id"] != "ilink-user-stable" || status.Credential["bot_token"] != "token-new" || status.Credential["ilink_bot_id"] != "bot-new" {
+		t.Fatalf("credential=%+v", status.Credential)
+	}
+	if status.State["status"] != "active" || status.State["last_error"] != "" {
+		t.Fatalf("state=%+v", status.State)
+	}
+	if status.State[sdk.RuntimeHealthKeyStreamConnectionState] != "" || status.State[sdk.RuntimeHealthKeyStreamLastError] != "" || status.State[sdk.RuntimeHealthKeyStreamSessionExpired] != false {
+		t.Fatalf("runtime health was not cleared: %+v", status.State)
+	}
+	if status.State["stream_session_expired_reason"] != "" || status.State["stream_session_expired_operation"] != "" || status.State["stream_session_expired_code"] != 0 || status.State["stream_session_expired_msg"] != "" {
+		t.Fatalf("expired detail was not cleared: %+v", status.State)
+	}
+}
+
 func TestWeixinConnectorScenarioQRCodeInboundAndFixedReply(t *testing.T) {
 	const fixedReply = "Beak Agent 已收到你的消息"
 	sentCh := make(chan scenarioSentMessage, 1)

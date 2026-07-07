@@ -180,7 +180,7 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 		resp, err := r.wx.GetUpdates(ctx, buf, longPollTimeout+2*time.Second)
 		if err != nil {
 			if errors.Is(err, weixin.ErrSessionExpired) {
-				_ = r.markSessionExpired(ctx, "getupdates session expired")
+				_ = r.markSessionExpired(ctx, "getupdates session expired", err)
 				return fmt.Errorf("weixin account %s session expired; run login again: %w", r.account.AccountID, err)
 			}
 			_ = r.markStreamError(ctx, err)
@@ -298,7 +298,7 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 	}
 	if err := r.sendTyping(ctx, chatKey, weixin.TypingStatusStart); err != nil {
 		if errors.Is(err, weixin.ErrSessionExpired) {
-			_ = r.markSessionExpired(ctx, "typing session expired")
+			_ = r.markSessionExpired(ctx, "typing session expired", err)
 			return "", false, err
 		}
 		r.logger.Printf("send typing start account=%s peer=%s error=%v", r.account.AccountID, chatKey, err)
@@ -610,13 +610,13 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 	replyToUserID := weixin.ChatIdentityFromStateKey(peerID).ReplyToUserID
 	if err := r.wx.SendText(ctx, replyToUserID, content, contextToken); err != nil {
 		if errors.Is(err, weixin.ErrSessionExpired) {
-			_ = r.markSessionExpired(ctx, "sendmessage session expired")
+			_ = r.markSessionExpired(ctx, "sendmessage session expired", err)
 		}
 		return err
 	}
 	if err := r.sendTyping(ctx, peerID, weixin.TypingStatusStop); err != nil {
 		if errors.Is(err, weixin.ErrSessionExpired) {
-			_ = r.markSessionExpired(ctx, "typing session expired")
+			_ = r.markSessionExpired(ctx, "typing session expired", err)
 			return err
 		}
 		r.logger.Printf("send typing stop account=%s peer=%s error=%v", r.account.AccountID, peerID, err)
@@ -696,9 +696,10 @@ func (r *AccountRunner) sendTyping(ctx context.Context, peerID string, status in
 	return r.wx.SendTyping(ctx, chat.ReplyToUserID, ticket, status)
 }
 
-func (r *AccountRunner) markSessionExpired(ctx context.Context, reason string) error {
+func (r *AccountRunner) markSessionExpired(ctx context.Context, reason string, cause error) error {
 	r.mu.Lock()
-	r.account.MarkLoginRequired(reason)
+	operation, errCode, errMsg, _ := weixin.SessionExpiredInfo(cause)
+	r.account.MarkLoginRequiredWithDetails(reason, operation, errCode, errMsg)
 	err := r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	return err

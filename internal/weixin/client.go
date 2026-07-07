@@ -112,7 +112,7 @@ func (c *Client) GetUpdates(ctx context.Context, getUpdatesBuf string, timeout t
 		return nil, err
 	}
 	if resp.ErrCode == sessionExpiredErrCode {
-		return nil, ErrSessionExpired
+		return nil, NewSessionExpiredError("getupdates", resp.ErrCode, resp.ErrMsg)
 	}
 	if resp.Ret != 0 || resp.ErrCode != 0 {
 		return nil, fmt.Errorf("get updates failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
@@ -173,7 +173,7 @@ func (c *Client) sendTextChunk(ctx context.Context, toUserID, text, contextToken
 		return err
 	}
 	if resp.ErrCode == sessionExpiredErrCode {
-		return ErrSessionExpired
+		return NewSessionExpiredError("sendmessage", resp.ErrCode, resp.ErrMsg)
 	}
 	if resp.Ret != 0 || resp.ErrCode != 0 {
 		return fmt.Errorf("send message failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
@@ -204,7 +204,7 @@ func (c *Client) GetTypingTicket(ctx context.Context, ilinkUserID, contextToken 
 		return "", err
 	}
 	if resp.ErrCode == sessionExpiredErrCode {
-		return "", ErrSessionExpired
+		return "", NewSessionExpiredError("getconfig", resp.ErrCode, resp.ErrMsg)
 	}
 	if resp.Ret != 0 || resp.ErrCode != 0 {
 		return "", fmt.Errorf("get config failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
@@ -242,7 +242,7 @@ func (c *Client) SendTyping(ctx context.Context, ilinkUserID, typingTicket strin
 		return err
 	}
 	if resp.ErrCode == sessionExpiredErrCode {
-		return ErrSessionExpired
+		return NewSessionExpiredError("sendtyping", resp.ErrCode, resp.ErrMsg)
 	}
 	if resp.Ret != 0 || resp.ErrCode != 0 {
 		return fmt.Errorf("send typing failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
@@ -270,7 +270,7 @@ func (c *Client) notify(ctx context.Context, endpoint string) error {
 		return err
 	}
 	if resp.ErrCode == sessionExpiredErrCode {
-		return ErrSessionExpired
+		return NewSessionExpiredError(endpoint, resp.ErrCode, resp.ErrMsg)
 	}
 	if resp.Ret != 0 || resp.ErrCode != 0 {
 		return fmt.Errorf("%s failed: ret=%d errcode=%d errmsg=%s", endpoint, resp.Ret, resp.ErrCode, resp.ErrMsg)

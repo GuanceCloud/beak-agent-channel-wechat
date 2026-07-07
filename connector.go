@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -402,15 +403,17 @@ func newConnectorStateStore(accountStore sdk.AccountStore) *connectorStateStore 
 }
 
 func (s *connectorStateStore) seed(account sdk.ChannelAccount) {
-	accountID := s.accountID(account)
-	if accountID == "" {
+	state := sdkAccountToState(account)
+	aliases := accountAliases(account, state.AccountID)
+	if len(aliases) == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := sdkAccountToState(account)
-	s.accounts[accountID] = &state
-	s.sdkAccounts[accountID] = account
+	for _, alias := range aliases {
+		s.accounts[alias] = &state
+		s.sdkAccounts[alias] = account
+	}
 }
 
 func (s *connectorStateStore) LoadAccount(ctx context.Context, accountID string) (*AccountState, error) {
@@ -473,10 +476,12 @@ func (s *connectorStateStore) SaveAccount(ctx context.Context, account *AccountS
 	account.EnsureMaps()
 	account.UpdatedAt = time.Now().UTC()
 	s.mu.Lock()
-	s.accounts[account.AccountID] = account
 	existing := s.sdkAccounts[account.AccountID]
 	sdkAccount := accountStateToSDK(*account, existing)
-	s.sdkAccounts[account.AccountID] = sdkAccount
+	for _, alias := range accountAliases(sdkAccount, account.AccountID) {
+		s.accounts[alias] = account
+		s.sdkAccounts[alias] = sdkAccount
+	}
 	accountStore := s.accountStore
 	s.mu.Unlock()
 	if accountStore != nil && sdkAccount.UUID != "" {
@@ -821,7 +826,7 @@ func (a gatewayRuntimeAdapter) BridgeParticipantID() string {
 
 func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 	state := AccountState{
-		AccountID:   firstString(account.UUID, account.Credential["account_id"], account.Credential["ilink_user_id"], account.Credential["ilink_bot_id"]),
+		AccountID:   firstString(account.Credential["account_id"], account.Credential["ilink_user_id"], account.Credential["ilink_bot_id"], account.UUID),
 		BotToken:    stringValue(account.Credential["bot_token"]),
 		BaseURL:     stringValue(account.Credential["base_url"]),
 		ILinkUserID: firstString(account.Credential["ilink_user_id"], account.State["ilink_user_id"]),
@@ -850,8 +855,23 @@ func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 	state.StreamReconnectError = stringValue(account.State[sdk.RuntimeHealthKeyStreamReconnectError])
 	state.StreamReconnectErrorAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamReconnectErrorAt])
 	state.StreamSessionExpired = boolValue(account.State[sdk.RuntimeHealthKeyStreamSessionExpired])
+	state.StreamSessionExpiredAt = timeValue(account.State["stream_session_expired_at"])
+	state.StreamSessionExpiredReason = stringValue(account.State["stream_session_expired_reason"])
+	state.StreamSessionExpiredOp = stringValue(account.State["stream_session_expired_operation"])
+	state.StreamSessionExpiredCode = intValue(account.State["stream_session_expired_code"])
+	state.StreamSessionExpiredMsg = stringValue(account.State["stream_session_expired_msg"])
 	state.EnsureMaps()
 	return state
+}
+
+func accountAliases(account sdk.ChannelAccount, accountID string) []string {
+	return uniqueStringList([]string{
+		accountID,
+		account.UUID,
+		stringValue(account.Credential["account_id"]),
+		stringValue(account.Credential["ilink_user_id"]),
+		stringValue(account.Credential["ilink_bot_id"]),
+	})
 }
 
 func stateToMap(account AccountState) map[string]any {
@@ -882,6 +902,11 @@ func stateToMap(account AccountState) map[string]any {
 		sdk.RuntimeHealthKeyStreamReconnectError:       account.StreamReconnectError,
 		sdk.RuntimeHealthKeyStreamReconnectErrorAt:     account.StreamReconnectErrorAt,
 		sdk.RuntimeHealthKeyStreamSessionExpired:       account.StreamSessionExpired,
+		"stream_session_expired_at":                    account.StreamSessionExpiredAt,
+		"stream_session_expired_reason":                account.StreamSessionExpiredReason,
+		"stream_session_expired_operation":             account.StreamSessionExpiredOp,
+		"stream_session_expired_code":                  account.StreamSessionExpiredCode,
+		"stream_session_expired_msg":                   account.StreamSessionExpiredMsg,
 		"updated_at":                                   account.UpdatedAt,
 	}
 	if identity := weixinBotIdentityState(account); len(identity) > 0 {
@@ -1080,6 +1105,51 @@ func boolValue(value any) bool {
 	default:
 		return false
 	}
+}
+
+func intValue(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int8:
+		return int(typed)
+	case int16:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case uint:
+		return int(typed)
+	case uint8:
+		return int(typed)
+	case uint16:
+		return int(typed)
+	case uint32:
+		return int(typed)
+	case uint64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return int(parsed)
+	case string:
+		parsed, _ := strconv.Atoi(strings.TrimSpace(typed))
+		return parsed
+	case json.RawMessage:
+		var number json.Number
+		if err := json.Unmarshal(typed, &number); err == nil {
+			return intValue(number)
+		}
+		var text string
+		if err := json.Unmarshal(typed, &text); err == nil {
+			return intValue(text)
+		}
+	}
+	return 0
 }
 
 func firstString(values ...any) string {

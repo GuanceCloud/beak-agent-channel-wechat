@@ -263,7 +263,7 @@ func TestPollMarksSessionExpired(t *testing.T) {
 	account.ContextTokens["peer-1"] = "ctx-1"
 	account.TypingTickets["peer-1"] = "ticket-1"
 	runner := testRunner(store, account)
-	runner.wx.(*fakeWeixin).updatesErr = weixin.ErrSessionExpired
+	runner.wx.(*fakeWeixin).updatesErr = weixin.NewSessionExpiredError("getupdates", -14, "session timeout")
 
 	err := runner.Poll(context.Background())
 	if err == nil {
@@ -274,6 +274,9 @@ func TestPollMarksSessionExpired(t *testing.T) {
 	}
 	if account.StreamConnectionState != sdk.RuntimeHealthStateExpired || !account.StreamSessionExpired || account.StreamLastError == "" || account.StreamLastErrorAt.IsZero() {
 		t.Fatalf("runtime health not marked expired: %+v", account)
+	}
+	if account.StreamSessionExpiredOp != "getupdates" || account.StreamSessionExpiredCode != -14 || account.StreamSessionExpiredMsg != "session timeout" || account.StreamSessionExpiredAt.IsZero() {
+		t.Fatalf("runtime health expired detail not marked: %+v", account)
 	}
 }
 
