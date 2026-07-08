@@ -61,6 +61,13 @@ type TextItem struct {
 type MessageItem struct {
 	Type     int       `json:"type,omitempty"`
 	TextItem *TextItem `json:"text_item,omitempty"`
+	RefMsg   *RefMsg   `json:"ref_msg,omitempty"`
+}
+
+type RefMsg struct {
+	Title       string       `json:"title,omitempty"`
+	MessageID   int64        `json:"message_id,omitempty"`
+	MessageItem *MessageItem `json:"message_item,omitempty"`
 }
 
 type WeixinMessage struct {

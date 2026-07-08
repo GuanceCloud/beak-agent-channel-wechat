@@ -149,6 +149,37 @@ func TestBuildInboundMessageMentionAllDoesNotMentionBot(t *testing.T) {
 	}
 }
 
+func TestBuildInboundMessageReferencedMessage(t *testing.T) {
+	inbound := BuildInboundMessage("workspace-1", "channel-1", "account-1", weixin.WeixinMessage{
+		MessageID:    105,
+		FromUserID:   "user-1",
+		ToUserID:     "bot-1",
+		GroupID:      "group-1",
+		MessageType:  weixin.MessageTypeUser,
+		MessageState: weixin.MessageStateFinish,
+		ItemList: []weixin.MessageItem{
+			{
+				Type:     weixin.MessageItemTypeText,
+				TextItem: &weixin.TextItem{Text: "current"},
+				RefMsg: &weixin.RefMsg{
+					Title:       "引用标题",
+					MessageID:   99,
+					MessageItem: &weixin.MessageItem{Type: weixin.MessageItemTypeText, TextItem: &weixin.TextItem{Text: "quoted"}},
+				},
+			},
+		},
+	}, "current")
+	if inbound.Text != "current" {
+		t.Fatalf("text=%q", inbound.Text)
+	}
+	if inbound.ReferencedMessage == nil {
+		t.Fatal("referenced_message is nil")
+	}
+	if inbound.ReferencedMessage.MessageID != "99" || inbound.ReferencedMessage.Text != "引用标题 | quoted" || inbound.ReferencedMessage.MessageType != "text" {
+		t.Fatalf("referenced_message=%+v", inbound.ReferencedMessage)
+	}
+}
+
 func TestProcessGroupOnlyBotMentionWithEmptyTextIsDelivered(t *testing.T) {
 	store := newMemoryStore()
 	account := &state.AccountState{AccountID: "account-1"}

@@ -319,20 +319,21 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 		mentions = uniqueMentionIdentities(mentions)
 	}
 	return sdk.InboundMessage{
-		WorkspaceUUID: workspaceRef,
-		Platform:      beak.PlatformWeixin,
-		AccountUUID:   accountID,
-		ChannelUUID:   channelUUID,
-		ChatType:      chat.ChatType,
-		ChatID:        chat.ChatID,
-		ChatIdentity:  weixinSDKChatIdentity(chat),
-		SenderID:      chat.SenderID,
-		MessageID:     messageID,
-		Text:          text,
-		DedupeKey:     msg.DedupeKey(accountID),
-		Mentions:      mentions,
-		MentionedMe:   msg.MentionedMe || msg.IsInAtList,
-		MentionAll:    mentionAll,
+		WorkspaceUUID:     workspaceRef,
+		Platform:          beak.PlatformWeixin,
+		AccountUUID:       accountID,
+		ChannelUUID:       channelUUID,
+		ChatType:          chat.ChatType,
+		ChatID:            chat.ChatID,
+		ChatIdentity:      weixinSDKChatIdentity(chat),
+		SenderID:          chat.SenderID,
+		MessageID:         messageID,
+		Text:              text,
+		ReferencedMessage: weixinReferencedMessage(msg),
+		DedupeKey:         msg.DedupeKey(accountID),
+		Mentions:          mentions,
+		MentionedMe:       msg.MentionedMe || msg.IsInAtList,
+		MentionAll:        mentionAll,
 		Raw: map[string]any{
 			"seq":             msg.Seq,
 			"message_id":      msg.MessageID,
@@ -351,6 +352,73 @@ func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin
 			"mentioned_me":    msg.MentionedMe || msg.IsInAtList,
 			"mention_all":     mentionAll,
 		},
+	}
+}
+
+func weixinReferencedMessage(msg weixin.WeixinMessage) *sdk.ReferencedMessage {
+	for _, item := range msg.ItemList {
+		if item.RefMsg == nil {
+			continue
+		}
+		ref := item.RefMsg
+		messageID := ""
+		if ref.MessageID != 0 {
+			messageID = fmt.Sprint(ref.MessageID)
+		}
+		refText := strings.TrimSpace(weixinReferenceText(ref))
+		if messageID == "" && refText == "" {
+			return nil
+		}
+		chat := msg.ChatIdentity()
+		return &sdk.ReferencedMessage{
+			Platform:    beak.PlatformWeixin,
+			MessageID:   messageID,
+			ChatType:    chat.ChatType,
+			ChatID:      chat.ChatID,
+			MessageType: weixinMessageItemTypeName(ref.MessageItem),
+			Text:        refText,
+			Raw: map[string]any{
+				"title":      strings.TrimSpace(ref.Title),
+				"message_id": ref.MessageID,
+			},
+		}
+	}
+	return nil
+}
+
+func weixinReferenceText(ref *weixin.RefMsg) string {
+	if ref == nil {
+		return ""
+	}
+	var parts []string
+	if title := strings.TrimSpace(ref.Title); title != "" {
+		parts = append(parts, title)
+	}
+	if text := strings.TrimSpace(weixinMessageItemText(ref.MessageItem)); text != "" {
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func weixinMessageItemText(item *weixin.MessageItem) string {
+	if item == nil {
+		return ""
+	}
+	if item.Type == weixin.MessageItemTypeText && item.TextItem != nil {
+		return strings.TrimSpace(item.TextItem.Text)
+	}
+	return ""
+}
+
+func weixinMessageItemTypeName(item *weixin.MessageItem) string {
+	if item == nil {
+		return ""
+	}
+	switch item.Type {
+	case weixin.MessageItemTypeText:
+		return "text"
+	default:
+		return fmt.Sprintf("%d", item.Type)
 	}
 }
 
