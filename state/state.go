@@ -47,6 +47,12 @@ type AccountState struct {
 	StreamSessionExpiredCode   int               `json:"stream_session_expired_code,omitempty"`
 	StreamSessionExpiredMsg    string            `json:"stream_session_expired_msg,omitempty"`
 	StreamSessionExpiredOp     string            `json:"stream_session_expired_operation,omitempty"`
+	LastInboundSkipReason      string            `json:"last_inbound_skip_reason,omitempty"`
+	LastInboundSkipAt          time.Time         `json:"last_inbound_skip_at,omitempty"`
+	LastInboundSkipMessageID   string            `json:"last_inbound_skip_message_id,omitempty"`
+	LastInboundError           string            `json:"last_inbound_error,omitempty"`
+	LastInboundErrorAt         time.Time         `json:"last_inbound_error_at,omitempty"`
+	LastInboundErrorMessageID  string            `json:"last_inbound_error_message_id,omitempty"`
 	UpdatedAt                  time.Time         `json:"updated_at"`
 }
 
@@ -131,6 +137,12 @@ func (a *AccountState) MarkActive() {
 	a.StreamSessionExpiredOp = ""
 	a.StreamSessionExpiredCode = 0
 	a.StreamSessionExpiredMsg = ""
+	a.LastInboundSkipReason = ""
+	a.LastInboundSkipAt = time.Time{}
+	a.LastInboundSkipMessageID = ""
+	a.LastInboundError = ""
+	a.LastInboundErrorAt = time.Time{}
+	a.LastInboundErrorMessageID = ""
 	a.GetUpdatesBuf = ""
 	a.ContextTokens = make(map[string]string)
 	a.TypingTickets = make(map[string]string)

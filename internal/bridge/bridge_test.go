@@ -349,6 +349,77 @@ func TestPollRecordsTemporaryErrorAndContinues(t *testing.T) {
 	}
 }
 
+func TestPollDoesNotAdvanceCursorWhenInboundProcessingFails(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1", BotToken: "token-1", GetUpdatesBuf: "buf-1"}
+	account.EnsureMaps()
+	runner := testRunner(store, account)
+	runner.beak.(*fakeBeak).createErr = errors.New("beak create failed")
+	runner.wx.(*fakeWeixin).updates = []*weixin.GetUpdatesResponse{{
+		GetUpdatesBuf: "buf-2",
+		Messages: []weixin.WeixinMessage{{
+			MessageID:    106,
+			FromUserID:   "peer-1",
+			MessageType:  weixin.MessageTypeUser,
+			MessageState: weixin.MessageStateFinish,
+			ItemList: []weixin.MessageItem{
+				{Type: weixin.MessageItemTypeText, TextItem: &weixin.TextItem{Text: "hello"}},
+			},
+		}},
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := runner.Poll(ctx)
+	if err == nil || err != context.DeadlineExceeded {
+		t.Fatalf("Poll should continue until context deadline, got %v", err)
+	}
+	if account.GetUpdatesBuf != "buf-1" {
+		t.Fatalf("cursor advanced after processing failure: get_updates_buf=%q", account.GetUpdatesBuf)
+	}
+	if account.LastInboundError == "" || account.LastInboundErrorAt.IsZero() || account.LastInboundErrorMessageID != "message:106" {
+		t.Fatalf("inbound processing error diagnostic not recorded: %+v", account)
+	}
+	if account.StreamLastError == "" || account.StreamLastErrorAt.IsZero() {
+		t.Fatalf("stream error diagnostic not recorded: %+v", account)
+	}
+}
+
+func TestPollRecordsSkippedUpdateAndAdvancesCursor(t *testing.T) {
+	store := newMemoryStore()
+	account := &state.AccountState{AccountID: "account-1", BotToken: "token-1", GetUpdatesBuf: "buf-1"}
+	account.EnsureMaps()
+	runner := testRunner(store, account)
+	runner.wx.(*fakeWeixin).updates = []*weixin.GetUpdatesResponse{{
+		GetUpdatesBuf: "buf-2",
+		Messages: []weixin.WeixinMessage{{
+			MessageID:    107,
+			FromUserID:   "peer-1",
+			MessageType:  weixin.MessageTypeBot,
+			MessageState: weixin.MessageStateFinish,
+			ItemList: []weixin.MessageItem{
+				{Type: weixin.MessageItemTypeText, TextItem: &weixin.TextItem{Text: "bot echo"}},
+			},
+		}},
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := runner.Poll(ctx)
+	if err == nil || err != context.DeadlineExceeded {
+		t.Fatalf("Poll should continue until context deadline, got %v", err)
+	}
+	if account.GetUpdatesBuf != "buf-2" {
+		t.Fatalf("cursor did not advance after non-retryable skip: get_updates_buf=%q", account.GetUpdatesBuf)
+	}
+	if account.LastInboundSkipReason != "message_type_2" || account.LastInboundSkipAt.IsZero() || account.LastInboundSkipMessageID != "message:107" {
+		t.Fatalf("skip diagnostic not recorded: %+v", account)
+	}
+	if len(runner.beak.(*fakeBeak).createdMessages) != 0 {
+		t.Fatalf("skipped update created messages: %+v", runner.beak.(*fakeBeak).createdMessages)
+	}
+}
+
 func TestStreamRuntimeHealthTransitions(t *testing.T) {
 	store := newMemoryStore()
 	account := &state.AccountState{AccountID: "account-1"}
@@ -650,9 +721,11 @@ func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool
 
 type fakeBeak struct {
 	ensureCalls     int
+	ensureErr       error
 	lastChatType    string
 	lastChatID      string
 	lastSenderID    string
+	createErr       error
 	createdMessages []beak.CreateMessageRequest
 	streamMu        sync.Mutex
 	streamCalls     int
@@ -718,10 +791,16 @@ func (f *fakeBeak) EnsureChatSession(_ context.Context, _, _, chatType, chatID, 
 	f.lastChatType = chatType
 	f.lastChatID = chatID
 	f.lastSenderID = senderID
+	if f.ensureErr != nil {
+		return "", f.ensureErr
+	}
 	return "sess-1", nil
 }
 
 func (f *fakeBeak) CreateMessage(_ context.Context, _ string, req beak.CreateMessageRequest) (*beak.CreateMessageResponse, error) {
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	f.createdMessages = append(f.createdMessages, req)
 	return &beak.CreateMessageResponse{MessageUUID: "beak-msg-1"}, nil
 }

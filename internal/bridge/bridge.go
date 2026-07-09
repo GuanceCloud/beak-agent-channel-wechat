@@ -164,6 +164,13 @@ type AccountRunner struct {
 	activeStreams map[string]bool
 }
 
+type processUpdateResult struct {
+	sessionUUID string
+	processed   bool
+	skipReason  string
+	err         error
+}
+
 func (r *AccountRunner) Poll(ctx context.Context) error {
 	longPollTimeout := r.options.Weixin.LongPollTimeout
 	for {
@@ -193,24 +200,36 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 
 		r.mu.Lock()
 		now := time.Now().UTC()
-		if resp.GetUpdatesBuf != "" {
-			r.account.GetUpdatesBuf = resp.GetUpdatesBuf
-		}
 		r.markStreamConnectedLocked(now)
-		_ = r.store.SaveAccount(ctx, r.account)
+		if err := r.store.SaveAccount(ctx, r.account); err != nil {
+			r.logger.Printf("save poll activity account=%s error=%v", r.account.AccountID, err)
+		}
 		r.mu.Unlock()
 
 		if resp.LongPollingTimeoutMS > 0 {
 			longPollTimeout = time.Duration(resp.LongPollingTimeoutMS) * time.Millisecond
 		}
+		processingFailed := false
 		for _, msg := range resp.Messages {
-			sessionUUID, processed, err := r.ProcessUpdate(ctx, msg)
-			if err != nil {
-				r.logger.Printf("process update account=%s peer=%s error=%v", r.account.AccountID, msg.FromUserID, err)
+			result := r.processUpdate(ctx, msg)
+			if result.err != nil {
+				processingFailed = true
+				_ = r.recordInboundError(ctx, msg, result.err)
+				r.logger.Printf("process update account=%s message=%s peer=%s error=%v", r.account.AccountID, updateDiagnosticID(msg), msg.FromUserID, result.err)
 				continue
 			}
-			if processed {
-				r.StartStream(ctx, msg.ChatIdentity().StateKey(), sessionUUID)
+			if result.skipReason != "" {
+				_ = r.recordInboundSkip(ctx, msg, result.skipReason)
+				r.logger.Printf("skip update account=%s message=%s peer=%s reason=%s", r.account.AccountID, updateDiagnosticID(msg), msg.FromUserID, result.skipReason)
+				continue
+			}
+			if result.processed {
+				r.StartStream(ctx, msg.ChatIdentity().StateKey(), result.sessionUUID)
+			}
+		}
+		if !processingFailed {
+			if err := r.advanceGetUpdatesCursor(ctx, resp.GetUpdatesBuf); err != nil {
+				r.logger.Printf("advance getupdates cursor account=%s error=%v", r.account.AccountID, err)
 			}
 		}
 		if !sleepOrDone(ctx, r.options.PollInterval) {
@@ -220,28 +239,34 @@ func (r *AccountRunner) Poll(ctx context.Context) error {
 }
 
 func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMessage) (string, bool, error) {
+	result := r.processUpdate(ctx, msg)
+	return result.sessionUUID, result.processed, result.err
+}
+
+func (r *AccountRunner) processUpdate(ctx context.Context, msg weixin.WeixinMessage) processUpdateResult {
 	text := strings.TrimSpace(msg.Text())
 	chat := msg.ChatIdentity()
 	if chat.ChatID == "" || chat.SenderID == "" {
-		return "", false, nil
+		return processUpdateResult{skipReason: "missing_chat_or_sender"}
 	}
 	if msg.MessageType != 0 && msg.MessageType != weixin.MessageTypeUser {
-		return "", false, nil
+		return processUpdateResult{skipReason: fmt.Sprintf("message_type_%d", msg.MessageType)}
 	}
 	if msg.MessageState != 0 && msg.MessageState != weixin.MessageStateFinish {
-		return "", false, nil
+		return processUpdateResult{skipReason: fmt.Sprintf("message_state_%d", msg.MessageState)}
 	}
 	inbound := BuildInboundMessage(r.options.WorkspaceRef, r.options.ChannelUUID, r.account.AccountID, msg, text)
 	if text == "" && !inbound.MentionedMe {
-		return "", false, nil
+		return processUpdateResult{skipReason: "empty_text_without_mention"}
 	}
 
 	key := inbound.DedupeKey
 	chatKey := chat.StateKey()
 	r.mu.Lock()
 	if _, ok := r.account.InboundSeen[key]; ok {
+		sessionUUID := r.account.PeerSessions[chatKey]
 		r.mu.Unlock()
-		return r.account.PeerSessions[chatKey], false, nil
+		return processUpdateResult{sessionUUID: sessionUUID, skipReason: "duplicate"}
 	}
 	if msg.ContextToken != "" {
 		r.account.ContextTokens[chatKey] = msg.ContextToken
@@ -253,7 +278,7 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 		var err error
 		sessionUUID, err = r.beak.EnsureChatSession(ctx, r.options.WorkspaceRef, r.account.AccountID, chat.ChatType, chat.ChatID, chat.SenderID, r.options.AgentParticipantID, r.options.BridgeParticipantID)
 		if err != nil {
-			return "", false, err
+			return processUpdateResult{err: err}
 		}
 	}
 
@@ -279,7 +304,7 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 		},
 	})
 	if err != nil {
-		return "", false, err
+		return processUpdateResult{err: err}
 	}
 
 	r.mu.Lock()
@@ -294,16 +319,16 @@ func (r *AccountRunner) ProcessUpdate(ctx context.Context, msg weixin.WeixinMess
 	err = r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	if err != nil {
-		return "", false, err
+		return processUpdateResult{err: err}
 	}
 	if err := r.sendTyping(ctx, chatKey, weixin.TypingStatusStart); err != nil {
 		if errors.Is(err, weixin.ErrSessionExpired) {
 			_ = r.markSessionExpired(ctx, "typing session expired", err)
-			return "", false, err
+			return processUpdateResult{err: err}
 		}
 		r.logger.Printf("send typing start account=%s peer=%s error=%v", r.account.AccountID, chatKey, err)
 	}
-	return sessionUUID, true, nil
+	return processUpdateResult{sessionUUID: sessionUUID, processed: true}
 }
 
 func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin.WeixinMessage, text string) sdk.InboundMessage {
@@ -784,6 +809,64 @@ func (r *AccountRunner) markStreamError(ctx context.Context, err error) error {
 	saveErr := r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	return saveErr
+}
+
+func (r *AccountRunner) advanceGetUpdatesCursor(ctx context.Context, getUpdatesBuf string) error {
+	if strings.TrimSpace(getUpdatesBuf) == "" {
+		return nil
+	}
+	r.mu.Lock()
+	r.account.GetUpdatesBuf = getUpdatesBuf
+	saveErr := r.store.SaveAccount(ctx, r.account)
+	r.mu.Unlock()
+	return saveErr
+}
+
+func (r *AccountRunner) recordInboundSkip(ctx context.Context, msg weixin.WeixinMessage, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		return nil
+	}
+	r.mu.Lock()
+	now := time.Now().UTC()
+	r.account.LastInboundSkipReason = reason
+	r.account.LastInboundSkipAt = now
+	r.account.LastInboundSkipMessageID = updateDiagnosticID(msg)
+	saveErr := r.store.SaveAccount(ctx, r.account)
+	r.mu.Unlock()
+	return saveErr
+}
+
+func (r *AccountRunner) recordInboundError(ctx context.Context, msg weixin.WeixinMessage, err error) error {
+	if err == nil {
+		return nil
+	}
+	r.mu.Lock()
+	now := time.Now().UTC()
+	errText := err.Error()
+	messageID := updateDiagnosticID(msg)
+	r.account.LastInboundError = errText
+	r.account.LastInboundErrorAt = now
+	r.account.LastInboundErrorMessageID = messageID
+	r.account.StreamLastError = errText
+	r.account.StreamLastErrorAt = now
+	saveErr := r.store.SaveAccount(ctx, r.account)
+	r.mu.Unlock()
+	return saveErr
+}
+
+func updateDiagnosticID(msg weixin.WeixinMessage) string {
+	switch {
+	case msg.MessageID != 0:
+		return fmt.Sprintf("message:%d", msg.MessageID)
+	case msg.Seq != 0:
+		return fmt.Sprintf("seq:%d", msg.Seq)
+	case strings.TrimSpace(msg.ClientID) != "":
+		return "client:" + strings.TrimSpace(msg.ClientID)
+	case msg.CreateTimeMS != 0:
+		return fmt.Sprintf("peer:%s:time:%d", msg.FromUserID, msg.CreateTimeMS)
+	default:
+		return "unknown"
+	}
 }
 
 func (r *AccountRunner) markStreamReconnecting(ctx context.Context) error {

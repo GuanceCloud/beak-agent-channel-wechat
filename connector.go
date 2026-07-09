@@ -860,6 +860,12 @@ func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 	state.StreamSessionExpiredOp = stringValue(account.State["stream_session_expired_operation"])
 	state.StreamSessionExpiredCode = intValue(account.State["stream_session_expired_code"])
 	state.StreamSessionExpiredMsg = stringValue(account.State["stream_session_expired_msg"])
+	state.LastInboundSkipReason = stringValue(account.State["last_inbound_skip_reason"])
+	state.LastInboundSkipAt = timeValue(account.State["last_inbound_skip_at"])
+	state.LastInboundSkipMessageID = stringValue(account.State["last_inbound_skip_message_id"])
+	state.LastInboundError = stringValue(account.State["last_inbound_error"])
+	state.LastInboundErrorAt = timeValue(account.State["last_inbound_error_at"])
+	state.LastInboundErrorMessageID = stringValue(account.State["last_inbound_error_message_id"])
 	state.EnsureMaps()
 	return state
 }
@@ -907,6 +913,12 @@ func stateToMap(account AccountState) map[string]any {
 		"stream_session_expired_operation":             account.StreamSessionExpiredOp,
 		"stream_session_expired_code":                  account.StreamSessionExpiredCode,
 		"stream_session_expired_msg":                   account.StreamSessionExpiredMsg,
+		"last_inbound_skip_reason":                     account.LastInboundSkipReason,
+		"last_inbound_skip_at":                         account.LastInboundSkipAt,
+		"last_inbound_skip_message_id":                 account.LastInboundSkipMessageID,
+		"last_inbound_error":                           account.LastInboundError,
+		"last_inbound_error_at":                        account.LastInboundErrorAt,
+		"last_inbound_error_message_id":                account.LastInboundErrorMessageID,
 		"updated_at":                                   account.UpdatedAt,
 	}
 	if identity := weixinBotIdentityState(account); len(identity) > 0 {
