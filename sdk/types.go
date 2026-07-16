@@ -35,6 +35,52 @@ type Connector interface {
 	Stop(ctx context.Context, account ChannelAccount) error
 }
 
+type WebhookResponse struct {
+	StatusCode int
+	Headers    map[string]string
+	Body       []byte
+}
+
+// WebhookError carries structured HTTP semantics across the SDK/host boundary.
+// Hosts should inspect HTTPStatusCode and ErrorCode instead of matching Error()
+// text, which remains display-only.
+type WebhookError struct {
+	StatusCode int
+	Code       string
+	Err        error
+}
+
+func (e *WebhookError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return http.StatusText(e.StatusCode)
+}
+
+func (e *WebhookError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *WebhookError) HTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
+}
+
+func (e *WebhookError) ErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 // HostStreamConnector is implemented by SDKs whose platform stream connection is
 // owned by the Beak host while platform endpoint and frame semantics stay inside
 // the SDK. Implementations must not start their own long-running reconnect loop.
@@ -157,10 +203,7 @@ type Runtime struct {
 	Logger          *log.Logger
 	PollInterval    time.Duration
 	StreamReconnect time.Duration
-
-	// Native may carry a connector-specific runtime while a platform package is
-	// being migrated to the generic Gateway runtime.
-	Native any
+	Native          any
 }
 
 type Gateway interface {
@@ -387,10 +430,10 @@ type StreamSessionRequest struct {
 }
 
 type StreamEvent struct {
-	EventUUID     string          `json:"event_uuid"`
-	WorkspaceUUID string          `json:"workspace_uuid"`
-	SessionUUID   string          `json:"session_uuid"`
-	EventType     string          `json:"event_type"`
+	EventUUID     string          `json:"event_uuid,omitempty"`
+	WorkspaceUUID string          `json:"workspace_uuid,omitempty"`
+	SessionUUID   string          `json:"session_uuid,omitempty"`
+	EventType     string          `json:"event_type,omitempty"`
 	MessageUUID   string          `json:"message_uuid,omitempty"`
 	SenderID      string          `json:"sender_id,omitempty"`
 	Content       string          `json:"content,omitempty"`
