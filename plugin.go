@@ -157,6 +157,7 @@ type SendTextRequest struct {
 	ToUserID     string
 	Text         string
 	ContextToken string
+	ClientID     string
 }
 
 type SendTextResult struct {
@@ -280,6 +281,7 @@ func (ch Channel) SendText(ctx context.Context, runtime Runtime, req SendTextReq
 		ToUserID:     req.ToUserID,
 		Text:         req.Text,
 		ContextToken: req.ContextToken,
+		ClientID:     req.ClientID,
 	})
 	if err != nil {
 		return nil, err

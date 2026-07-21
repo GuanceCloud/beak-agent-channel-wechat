@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
 )
 
@@ -832,6 +835,19 @@ func TestWeixinConnectorSendUsesRequestedAccount(t *testing.T) {
 	}
 }
 
+func TestWeixinConnectorSendRejectsEmptyText(t *testing.T) {
+	result, err := NewConnector().Send(context.Background(), sdk.Runtime{
+		Account: sdkAccount("account-1", "token-1", "https://example.invalid", map[string]string{"group:group-1": "ctx-1"}),
+	}, sdk.OutboundMessage{
+		AccountUUID: "account-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "group-1",
+	})
+	if err == nil || result != nil || !strings.Contains(err.Error(), "text is required") {
+		t.Fatalf("result=%+v error=%v, want empty text rejection", result, err)
+	}
+}
+
 func TestWeixinConnectorSendMarkdownFallsBackToText(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ilink/bot/sendmessage" {
@@ -1165,6 +1181,185 @@ func TestWeixinConnectorSendLoadsLatestAccountState(t *testing.T) {
 	}
 }
 
+func TestWeixinConnectorSendResumesMultipartWithoutDuplicatingCompletedChunks(t *testing.T) {
+	var mu sync.Mutex
+	var requests []struct {
+		Text     string
+		ClientID string
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Message struct {
+				ClientID string `json:"client_id"`
+				ItemList []struct {
+					TextItem struct {
+						Text string `json:"text"`
+					} `json:"text_item"`
+				} `json:"item_list"`
+			} `json:"msg"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		call := len(requests) + 1
+		requests = append(requests, struct {
+			Text     string
+			ClientID string
+		}{Text: body.Message.ItemList[0].TextItem.Text, ClientID: body.Message.ClientID})
+		mu.Unlock()
+		if call == 2 {
+			http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+	}))
+	defer server.Close()
+
+	store := newPatchSDKAccountStore(map[string]any{
+		"context_tokens": map[string]string{"group:group-1": "ctx-1"},
+	})
+	runtime := sdk.Runtime{
+		Account:      sdkAccount("account-1", "token-1", server.URL, nil),
+		AccountStore: store,
+	}
+	req := sdk.OutboundMessage{
+		AccountUUID: "account-1",
+		MessageUUID: "message-resume-1",
+		ChatType:    sdk.ChatTypeGroup,
+		ChatID:      "group-1",
+		Text:        strings.Repeat("你", weixin.MaxTextRunes+10),
+	}
+
+	if _, err := NewConnector().Send(context.Background(), runtime, req); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("first Send() error = %v, want temporary platform failure", err)
+	}
+	result, err := NewConnector().Send(context.Background(), runtime, req)
+	if err != nil {
+		t.Fatalf("resumed Send() error = %v", err)
+	}
+	if result.Raw["resumed"] != true {
+		t.Fatalf("resumed result = %#v", result)
+	}
+	mu.Lock()
+	gotRequests := append([]struct {
+		Text     string
+		ClientID string
+	}(nil), requests...)
+	mu.Unlock()
+	if len(gotRequests) != 3 {
+		t.Fatalf("requests = %d, want 3", len(gotRequests))
+	}
+	if gotRequests[0].Text == gotRequests[2].Text {
+		t.Fatal("completed first chunk was sent again during resume")
+	}
+	if gotRequests[1] != gotRequests[2] {
+		t.Fatalf("failed/retried chunk differ: failed=%+v retried=%+v", gotRequests[1], gotRequests[2])
+	}
+	if gotRequests[0].ClientID == "" || gotRequests[0].ClientID == gotRequests[1].ClientID {
+		t.Fatalf("client ids are not stable per chunk: %+v", gotRequests)
+	}
+
+	if _, err := NewConnector().Send(context.Background(), runtime, req); err != nil {
+		t.Fatalf("completed replay error = %v", err)
+	}
+	mu.Lock()
+	requestCount := len(requests)
+	mu.Unlock()
+	if requestCount != 3 {
+		t.Fatalf("completed replay sent another request: %d", requestCount)
+	}
+	changed := req
+	changed.Text += " changed"
+	if _, err := NewConnector().Send(context.Background(), runtime, changed); err == nil || !strings.Contains(err.Error(), "different outbound payload") {
+		t.Fatalf("changed payload error = %v, want message_uuid reuse rejection", err)
+	}
+
+	state, err := store.LoadChannelAccountState(context.Background(), "account-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := mapValue(decodeOutboundChunkProgressEntries(state[outboundChunkProgressKey])[req.MessageUUID])
+	if entry["completed"] != true || intValue(entry["next_index"]) != 2 {
+		t.Fatalf("stored progress = %#v, want completed two chunks", entry)
+	}
+}
+
+func TestWeixinConnectorSendMultipartRequiresRetryIdentityAndStore(t *testing.T) {
+	text := strings.Repeat("你", weixin.MaxTextRunes+1)
+	runtime := sdk.Runtime{Account: sdkAccount("account-1", "token-1", "https://example.invalid", map[string]string{"user-1": "ctx-1"})}
+	request := sdk.OutboundMessage{AccountUUID: "account-1", ChatType: sdk.ChatTypeDirect, ChatID: "user-1", Text: text}
+	if _, err := NewConnector().Send(context.Background(), runtime, request); err == nil || !strings.Contains(err.Error(), "message_uuid") {
+		t.Fatalf("missing message_uuid error = %v", err)
+	}
+	request.MessageUUID = "message-1"
+	if _, err := NewConnector().Send(context.Background(), runtime, request); err == nil || !strings.Contains(err.Error(), "AccountStore") {
+		t.Fatalf("missing AccountStore error = %v", err)
+	}
+}
+
+func TestWeixinConnectorSendProgressUsesBoundedPatchWithoutHealthOverwrite(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ret": 0})
+	}))
+	defer server.Close()
+
+	oldEntries := make([]any, 0, maxTrackedOutboundProgress)
+	for index := 0; index < maxTrackedOutboundProgress; index++ {
+		oldEntries = append(oldEntries, map[string]any{
+			"message_uuid": fmt.Sprintf("old-%03d", index),
+			"fingerprint":  "old",
+			"next_index":   1,
+			"client_ids":   []any{"old-client"},
+			"completed":    true,
+			"updated_at":   time.Date(2026, 1, 1, 0, 0, index, 0, time.UTC).Format(time.RFC3339Nano),
+		})
+	}
+	store := newPatchSDKAccountStore(map[string]any{
+		"context_tokens":                      map[string]string{"user-1": "ctx-1"},
+		sdk.RuntimeHealthKeyStreamLastEventAt: "2026-07-21T00:00:00Z",
+		outboundChunkProgressKey:              oldEntries,
+	})
+	_, err := NewConnector().Send(context.Background(), sdk.Runtime{
+		Account:      sdkAccount("account-1", "token-1", server.URL, nil),
+		AccountStore: store,
+	}, sdk.OutboundMessage{
+		AccountUUID: "account-1",
+		MessageUUID: "message-new",
+		ChatType:    sdk.ChatTypeDirect,
+		ChatID:      "user-1",
+		Text:        strings.Repeat("你", weixin.MaxTextRunes+1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, patch := range store.savedPatches() {
+		if _, ok := patch[sdk.RuntimeHealthKeyStreamLastEventAt]; ok {
+			t.Fatalf("progress patch overwrote runtime health: %#v", patch)
+		}
+		if len(patch) != 2 || patch[outboundChunkProgressKey] == nil || patch["updated_at"] == nil {
+			t.Fatalf("progress patch is not atomic and narrow: %#v", patch)
+		}
+	}
+	state, err := store.LoadChannelAccountState(context.Background(), "account-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state[sdk.RuntimeHealthKeyStreamLastEventAt] != "2026-07-21T00:00:00Z" {
+		t.Fatalf("runtime health was changed: %#v", state)
+	}
+	entries := decodeOutboundChunkProgressEntries(state[outboundChunkProgressKey])
+	if len(entries) != maxTrackedOutboundProgress {
+		t.Fatalf("progress entries = %d, want %d", len(entries), maxTrackedOutboundProgress)
+	}
+	if _, ok := entries["old-000"]; ok {
+		t.Fatal("oldest progress entry was not pruned")
+	}
+	if _, ok := entries["message-new"]; !ok {
+		t.Fatal("new progress entry was not stored")
+	}
+}
+
 func TestWeixinConnectorSendRequiresAccountWhenAmbiguous(t *testing.T) {
 	_, err := NewConnector().Send(context.Background(), sdk.Runtime{
 		Accounts: []sdk.ChannelAccount{
@@ -1323,6 +1518,43 @@ func (g *scenarioSDKGateway) BridgeParticipantID(string) string {
 type fakeSDKAccountStore struct {
 	mu     sync.Mutex
 	states map[string]map[string]any
+}
+
+type patchSDKAccountStore struct {
+	mu      sync.Mutex
+	state   map[string]any
+	patches []map[string]any
+}
+
+func newPatchSDKAccountStore(state map[string]any) *patchSDKAccountStore {
+	return &patchSDKAccountStore{state: cloneMap(state)}
+}
+
+func (s *patchSDKAccountStore) SaveChannelAccountState(_ context.Context, _ string, patch map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	copyPatch := cloneMap(patch)
+	s.patches = append(s.patches, copyPatch)
+	for key, value := range copyPatch {
+		s.state[key] = value
+	}
+	return nil
+}
+
+func (s *patchSDKAccountStore) LoadChannelAccountState(_ context.Context, _ string) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneMap(s.state), nil
+}
+
+func (s *patchSDKAccountStore) savedPatches() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]map[string]any, 0, len(s.patches))
+	for _, patch := range s.patches {
+		out = append(out, cloneMap(patch))
+	}
+	return out
 }
 
 func newFakeSDKAccountStore() *fakeSDKAccountStore {

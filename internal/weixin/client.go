@@ -124,6 +124,12 @@ func (c *Client) GetUpdates(ctx context.Context, getUpdatesBuf string, timeout t
 }
 
 func (c *Client) SendText(ctx context.Context, toUserID, text, contextToken string) error {
+	return c.SendTextWithClientID(ctx, toUserID, text, contextToken, "")
+}
+
+// SendTextWithClientID sends text with a caller-supplied idempotency key. A
+// non-empty clientID is only valid for a single platform-sized chunk.
+func (c *Client) SendTextWithClientID(ctx context.Context, toUserID, text, contextToken, clientID string) error {
 	if strings.TrimSpace(toUserID) == "" {
 		return fmt.Errorf("to_user_id is required")
 	}
@@ -137,19 +143,25 @@ func (c *Client) SendText(ctx context.Context, toUserID, text, contextToken stri
 	if len(chunks) == 0 {
 		return fmt.Errorf("text is required")
 	}
+	if strings.TrimSpace(clientID) != "" && len(chunks) != 1 {
+		return fmt.Errorf("client_id requires a single text chunk")
+	}
 	for _, chunk := range chunks {
-		if err := c.sendTextChunk(ctx, toUserID, chunk, contextToken); err != nil {
+		if err := c.sendTextChunk(ctx, toUserID, chunk, contextToken, clientID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) sendTextChunk(ctx context.Context, toUserID, text, contextToken string) error {
+func (c *Client) sendTextChunk(ctx context.Context, toUserID, text, contextToken, clientID string) error {
+	if strings.TrimSpace(clientID) == "" {
+		clientID = newClientID()
+	}
 	body := SendMessageRequest{
 		Message: WeixinMessage{
 			ToUserID:     toUserID,
-			ClientID:     newClientID(),
+			ClientID:     clientID,
 			MessageType:  MessageTypeBot,
 			MessageState: MessageStateFinish,
 			ContextToken: contextToken,

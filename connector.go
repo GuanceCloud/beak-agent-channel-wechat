@@ -2,9 +2,12 @@ package beakweixin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +16,13 @@ import (
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
 )
+
+const (
+	maxTrackedOutboundProgress = 256
+	outboundChunkProgressKey   = "outbound_chunk_progress"
+)
+
+var outboundSendLocks [64]sync.Mutex
 
 type Connector struct {
 	channel Channel
@@ -166,20 +176,266 @@ func (c Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbou
 	if err != nil {
 		return nil, err
 	}
-	result, err := c.channel.SendText(ctx, native, SendTextRequest{
-		AccountID:    accountID,
-		ToUserID:     toUserID,
-		Text:         weixinOutboundMentionText(req),
-		ContextToken: accountState.ContextTokens[contextKey],
-	})
-	if err != nil {
-		return nil, err
+	text := weixinOutboundMentionText(req)
+	chunks := weixin.SplitText(text, weixin.MaxTextRunes)
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("weixin outbound text is required")
 	}
-	return &sdk.SendResult{
+	if len(chunks) > 1 && strings.TrimSpace(req.MessageUUID) == "" {
+		return nil, fmt.Errorf("weixin multipart outbound requires message_uuid for retry-safe delivery")
+	}
+	if len(chunks) > 1 && runtime.AccountStore == nil {
+		return nil, fmt.Errorf("weixin multipart outbound requires sdk.Runtime.AccountStore for retry-safe delivery")
+	}
+
+	progressEntries := map[string]any{}
+	progress := outboundChunkProgress{}
+	resumed := false
+	if len(chunks) > 1 {
+		lock := outboundSendLock(accountID)
+		lock.Lock()
+		defer lock.Unlock()
+
+		progressEntries, progress, err = loadOutboundChunkProgress(ctx, runtime, account, req, contextKey, toUserID, chunks)
+		if err != nil {
+			return nil, err
+		}
+		if progress.Completed {
+			return weixinSendResult(accountID, progress.ClientIDs, len(chunks), true), nil
+		}
+		resumed = progress.NextIndex > 0
+	}
+
+	clientIDs := append([]string(nil), progress.ClientIDs...)
+	for index := progress.NextIndex; index < len(chunks); index++ {
+		clientID := ""
+		if progress.Key != "" {
+			clientID = weixinOutboundClientID(req.MessageUUID, progress.Fingerprint, index)
+		}
+		result, err := c.channel.SendText(ctx, native, SendTextRequest{
+			AccountID:    accountID,
+			ToUserID:     toUserID,
+			Text:         chunks[index],
+			ContextToken: accountState.ContextTokens[contextKey],
+			ClientID:     clientID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if clientID == "" {
+			clientID = result.MessageID
+		}
+		if clientID != "" {
+			clientIDs = append(clientIDs, clientID)
+		}
+		if progress.Key != "" {
+			progress.NextIndex = index + 1
+			progress.ClientIDs = append([]string(nil), clientIDs...)
+			progress.Completed = progress.NextIndex == len(chunks)
+			progress.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			progressEntries[progress.Key] = encodeOutboundChunkProgress(progress)
+			pruneOutboundChunkProgress(progressEntries, maxTrackedOutboundProgress)
+			patch := map[string]any{
+				outboundChunkProgressKey: encodeOutboundChunkProgressEntries(progressEntries),
+				"updated_at":             progress.UpdatedAt,
+			}
+			if err := runtime.AccountStore.SaveChannelAccountState(ctx, accountID, patch); err != nil {
+				return nil, fmt.Errorf("weixin persist send progress after chunk %d/%d: %w", index+1, len(chunks), err)
+			}
+		}
+	}
+	return weixinSendResult(accountID, clientIDs, len(chunks), resumed), nil
+}
+
+type outboundChunkProgress struct {
+	Key         string
+	Fingerprint string
+	NextIndex   int
+	ClientIDs   []string
+	Completed   bool
+	UpdatedAt   string
+}
+
+func loadOutboundChunkProgress(ctx context.Context, runtime sdk.Runtime, account sdk.ChannelAccount, req sdk.OutboundMessage, contextKey, toUserID string, chunks []string) (map[string]any, outboundChunkProgress, error) {
+	progress := outboundChunkProgress{
+		Key:         strings.TrimSpace(req.MessageUUID),
+		Fingerprint: weixinOutboundFingerprint(accountKey(account), req, contextKey, toUserID, chunks),
+	}
+	state := cloneMap(account.State)
+	stored, err := runtime.AccountStore.LoadChannelAccountState(ctx, accountKey(account))
+	if err != nil {
+		return nil, outboundChunkProgress{}, err
+	}
+	for key, value := range stored {
+		state[key] = value
+	}
+	entries := decodeOutboundChunkProgressEntries(state[outboundChunkProgressKey])
+	storedValue, exists := entries[progress.Key]
+	if !exists {
+		return entries, progress, nil
+	}
+	storedProgress := decodeOutboundChunkProgress(progress.Key, storedValue)
+	if storedProgress.Fingerprint != progress.Fingerprint {
+		return nil, outboundChunkProgress{}, fmt.Errorf("weixin message_uuid %s was already used for a different outbound payload", progress.Key)
+	}
+	if storedProgress.NextIndex < 0 || storedProgress.NextIndex > len(chunks) || len(storedProgress.ClientIDs) != storedProgress.NextIndex {
+		return nil, outboundChunkProgress{}, fmt.Errorf("weixin outbound progress for message_uuid %s is invalid", progress.Key)
+	}
+	storedProgress.Key = progress.Key
+	storedProgress.Completed = storedProgress.NextIndex == len(chunks)
+	return entries, storedProgress, nil
+}
+
+func weixinOutboundFingerprint(accountUUID string, req sdk.OutboundMessage, contextKey, toUserID string, chunks []string) string {
+	value, _ := json.Marshal(struct {
+		AccountUUID string   `json:"account_uuid"`
+		ChatType    string   `json:"chat_type"`
+		ChatID      string   `json:"chat_id"`
+		ContextKey  string   `json:"context_key"`
+		ToUserID    string   `json:"to_user_id"`
+		Chunks      []string `json:"chunks"`
+	}{
+		AccountUUID: strings.TrimSpace(accountUUID),
+		ChatType:    strings.TrimSpace(req.ChatType),
+		ChatID:      strings.TrimSpace(req.ChatID),
+		ContextKey:  strings.TrimSpace(contextKey),
+		ToUserID:    strings.TrimSpace(toUserID),
+		Chunks:      chunks,
+	})
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
+}
+
+func weixinOutboundClientID(messageUUID, fingerprint string, index int) string {
+	messageUUID = strings.TrimSpace(messageUUID)
+	if messageUUID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(messageUUID + "\x00" + fingerprint + "\x00" + strconv.Itoa(index)))
+	return "beak-" + hex.EncodeToString(sum[:16])
+}
+
+func weixinSendResult(accountUUID string, clientIDs []string, chunkCount int, resumed bool) *sdk.SendResult {
+	result := &sdk.SendResult{
 		Platform:    Platform,
-		AccountUUID: result.AccountID,
-		MessageID:   result.MessageID,
-	}, nil
+		AccountUUID: accountUUID,
+		Raw: map[string]any{
+			"chunk_count": chunkCount,
+			"client_ids":  append([]string(nil), clientIDs...),
+		},
+	}
+	if resumed {
+		result.Raw["resumed"] = true
+	}
+	return result
+}
+
+func encodeOutboundChunkProgress(progress outboundChunkProgress) map[string]any {
+	clientIDs := make([]any, 0, len(progress.ClientIDs))
+	for _, clientID := range progress.ClientIDs {
+		clientIDs = append(clientIDs, clientID)
+	}
+	return map[string]any{
+		"fingerprint": progress.Fingerprint,
+		"next_index":  progress.NextIndex,
+		"client_ids":  clientIDs,
+		"completed":   progress.Completed,
+		"updated_at":  progress.UpdatedAt,
+	}
+}
+
+func decodeOutboundChunkProgress(key string, value any) outboundChunkProgress {
+	raw := mapValue(value)
+	progress := outboundChunkProgress{
+		Key:         key,
+		Fingerprint: strings.TrimSpace(stringValue(raw["fingerprint"])),
+		NextIndex:   intValue(raw["next_index"]),
+		Completed:   boolValue(raw["completed"]),
+		UpdatedAt:   strings.TrimSpace(stringValue(raw["updated_at"])),
+	}
+	switch values := raw["client_ids"].(type) {
+	case []any:
+		for _, value := range values {
+			if clientID := strings.TrimSpace(stringValue(value)); clientID != "" {
+				progress.ClientIDs = append(progress.ClientIDs, clientID)
+			}
+		}
+	case []string:
+		for _, value := range values {
+			if clientID := strings.TrimSpace(value); clientID != "" {
+				progress.ClientIDs = append(progress.ClientIDs, clientID)
+			}
+		}
+	}
+	return progress
+}
+
+func decodeOutboundChunkProgressEntries(value any) map[string]any {
+	entries := map[string]any{}
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			entries[key] = item
+		}
+	case []any:
+		for _, item := range typed {
+			raw := mapValue(item)
+			key := strings.TrimSpace(stringValue(raw["message_uuid"]))
+			if key == "" {
+				continue
+			}
+			delete(raw, "message_uuid")
+			entries[key] = raw
+		}
+	case []map[string]any:
+		for _, item := range typed {
+			raw := cloneMap(item)
+			key := strings.TrimSpace(stringValue(raw["message_uuid"]))
+			if key == "" {
+				continue
+			}
+			delete(raw, "message_uuid")
+			entries[key] = raw
+		}
+	}
+	return entries
+}
+
+func encodeOutboundChunkProgressEntries(entries map[string]any) []any {
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	encoded := make([]any, 0, len(keys))
+	for _, key := range keys {
+		entry := mapValue(entries[key])
+		entry["message_uuid"] = key
+		encoded = append(encoded, entry)
+	}
+	return encoded
+}
+
+func pruneOutboundChunkProgress(entries map[string]any, limit int) {
+	if limit <= 0 || len(entries) <= limit {
+		return
+	}
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return stringValue(mapValue(entries[keys[i]])["updated_at"]) < stringValue(mapValue(entries[keys[j]])["updated_at"])
+	})
+	for len(entries) > limit {
+		delete(entries, keys[0])
+		keys = keys[1:]
+	}
+}
+
+func outboundSendLock(accountUUID string) *sync.Mutex {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(accountUUID)))
+	return &outboundSendLocks[int(sum[0])%len(outboundSendLocks)]
 }
 
 func (c Connector) Acknowledge(ctx context.Context, runtime sdk.Runtime, req sdk.OutboundAck) (*sdk.AckResult, error) {
@@ -1188,6 +1444,21 @@ func cloneMap(value map[string]any) map[string]any {
 		out[key] = item
 	}
 	return out
+}
+
+func mapValue(value any) map[string]any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMap(typed)
+	case map[string]string:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = item
+		}
+		return out
+	default:
+		return map[string]any{}
+	}
 }
 
 var _ sdk.Connector = Connector{}

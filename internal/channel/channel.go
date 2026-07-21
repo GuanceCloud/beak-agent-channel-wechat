@@ -70,6 +70,7 @@ type SendTextRequest struct {
 	ToUserID     string
 	Text         string
 	ContextToken string
+	ClientID     string
 }
 
 type SendTextResult struct {
@@ -381,7 +382,7 @@ func (c *Client) SendText(ctx context.Context, req SendTextRequest) (*SendTextRe
 		wxCfg.BaseURL = account.BaseURL
 	}
 	wxClient := c.newWeixinClient(wxCfg, account.BotToken)
-	if err := wxClient.SendText(ctx, req.ToUserID, req.Text, contextToken); err != nil {
+	if err := wxClient.SendTextWithClientID(ctx, req.ToUserID, req.Text, contextToken, req.ClientID); err != nil {
 		return nil, err
 	}
 	return &SendTextResult{Channel: "weixin", AccountID: accountID}, nil
