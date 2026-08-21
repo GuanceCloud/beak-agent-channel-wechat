@@ -10,6 +10,7 @@ import (
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/bridge"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/channel"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/state"
 )
 
@@ -37,6 +38,7 @@ type Capabilities struct {
 	DirectChat     bool
 	Text           bool
 	Media          bool
+	MediaKinds     []string
 	BlockStreaming bool
 }
 
@@ -87,12 +89,13 @@ type StateStore interface {
 type AccountState = state.AccountState
 
 type UserMessage struct {
-	AccountID  string
-	PeerUserID string
-	SenderID   string
-	Content    string
-	DedupeKey  string
-	Metadata   map[string]any
+	AccountID   string
+	PeerUserID  string
+	SenderID    string
+	Content     string
+	Attachments []sdk.MediaAttachment
+	DedupeKey   string
+	Metadata    map[string]any
 }
 
 type StreamRequest struct {
@@ -160,6 +163,18 @@ type SendTextRequest struct {
 	ClientID     string
 }
 
+type SendAttachmentRequest struct {
+	AccountID    string
+	ToUserID     string
+	Kind         string
+	Path         string
+	URL          string
+	FileName     string
+	ContentType  string
+	ContextToken string
+	ClientID     string
+}
+
 type SendTextResult struct {
 	Channel   string
 	AccountID string
@@ -195,7 +210,8 @@ func (Channel) Capabilities() Capabilities {
 	return Capabilities{
 		DirectChat:     true,
 		Text:           true,
-		Media:          false,
+		Media:          true,
+		MediaKinds:     []string{sdk.MediaKindImage, sdk.MediaKindFile, sdk.MediaKindAudio, sdk.MediaKindVideo, sdk.MediaKindSticker},
 		BlockStreaming: true,
 	}
 }
@@ -289,6 +305,18 @@ func (ch Channel) SendText(ctx context.Context, runtime Runtime, req SendTextReq
 	return fromChannelSendTextResult(result), nil
 }
 
+func (ch Channel) SendAttachment(ctx context.Context, runtime Runtime, req SendAttachmentRequest) (*SendTextResult, error) {
+	client, err := ch.client(runtime)
+	if err != nil {
+		return nil, err
+	}
+	result, err := client.SendAttachment(ctx, channel.SendAttachmentRequest{AccountID: req.AccountID, ToUserID: req.ToUserID, Kind: req.Kind, Path: req.Path, URL: req.URL, FileName: req.FileName, ContentType: req.ContentType, ContextToken: req.ContextToken, ClientID: req.ClientID})
+	if err != nil {
+		return nil, err
+	}
+	return fromChannelSendTextResult(result), nil
+}
+
 func (Channel) Stop(context.Context, Runtime) error {
 	return nil
 }
@@ -358,12 +386,13 @@ func (a beakRuntimeAdapter) EnsureWeixinChatSession(ctx context.Context, account
 
 func (a beakRuntimeAdapter) CreateWeixinUserMessage(ctx context.Context, sessionUUID string, msg channel.UserMessage) (string, error) {
 	return a.runtime.CreateWeixinUserMessage(ctx, sessionUUID, UserMessage{
-		AccountID:  msg.AccountID,
-		PeerUserID: msg.PeerUserID,
-		SenderID:   msg.SenderID,
-		Content:    msg.Content,
-		DedupeKey:  msg.DedupeKey,
-		Metadata:   msg.Metadata,
+		AccountID:   msg.AccountID,
+		PeerUserID:  msg.PeerUserID,
+		SenderID:    msg.SenderID,
+		Content:     msg.Content,
+		Attachments: msg.Attachments,
+		DedupeKey:   msg.DedupeKey,
+		Metadata:    msg.Metadata,
 	})
 }
 

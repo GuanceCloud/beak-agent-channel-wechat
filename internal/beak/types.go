@@ -3,6 +3,8 @@ package beak
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
 )
 
 type Channel struct {
@@ -78,12 +80,13 @@ type AddParticipantsResponse struct {
 }
 
 type CreateMessageRequest struct {
-	WorkspaceUUID string         `json:"workspace_uuid"`
-	SenderID      string         `json:"sender_id"`
-	Content       string         `json:"content"`
-	DedupeKey     string         `json:"dedupe_key,omitempty"`
-	ReplyToUUID   string         `json:"reply_to_uuid,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
+	WorkspaceUUID string                `json:"workspace_uuid"`
+	SenderID      string                `json:"sender_id"`
+	Content       string                `json:"content"`
+	Attachments   []sdk.MediaAttachment `json:"attachments,omitempty"`
+	DedupeKey     string                `json:"dedupe_key,omitempty"`
+	ReplyToUUID   string                `json:"reply_to_uuid,omitempty"`
+	Metadata      map[string]any        `json:"metadata,omitempty"`
 }
 
 type CreateMessageResponse struct {

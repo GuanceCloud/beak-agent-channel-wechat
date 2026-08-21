@@ -13,8 +13,9 @@ v1 支持：
 - 通过 `beakweixin.NewConnector()` 暴露通用 `sdk.Connector` 实现。
 - 通过 Tencent iLink 完成微信 bot account 二维码登录。
 - 由 Beak host 保存 credential 和 connector state。
-- `ilink/bot/getupdates` 中的微信文本消息入站到 Beak session。
+- `ilink/bot/getupdates` 中的微信文本和媒体消息入站到 Beak session；媒体由 SDK 下载并解密到临时本地路径，再交给 host 导入。
 - Beak agent 文本或 markdown 格式输出通过 `connector.Send` / `ilink/bot/sendmessage` 回发到微信；markdown 使用同一组通用字段，并在 SDK 内退化为 text。
+- Beak agent 的本地图片、文件、音频和视频附件通过 iLink CDN 加密上传后，以微信原生媒体消息回发。
 - 通过 `Acknowledge` 提供处理中轻量确认；微信会把它映射为 `getconfig` 和 `sendtyping` 的 typing start/stop。
 - 单聊和显式群聊标准化。
 - 标准 `bot_identity` state 用于统一 SDK 暴露；账号身份仍优先使用稳定的 `ilink_user_id`。
@@ -23,10 +24,7 @@ v1 支持：
 - 如果同一个微信群里接入多个微信 bot account，每个 bot account 都创建或复用自己的 Beak session。
 - bot account 连接保存在 `channel_accounts`，启动连接不会创建 task，也不会额外创建 link session。
 
-v1 不支持：
-
-- media、voice。
-- CDN/AES 媒体上传下载。
+媒体公共契约支持 image、file、audio、video；iLink CDN/AES 上传下载全部封装在 SDK 内部，Beak host 只接收统一的本地路径附件。
 - 把微信 connector 做成 CLI。
 - 让 SDK 维护本地配置文件或本地状态目录。
 
@@ -77,7 +75,7 @@ func WeixinConnector() sdk.Connector {
 - 登录模式为 `qr_code`
 - 支持文本单聊
 - 当 iLink 入站 payload 有明确 `group_id` 时支持文本群聊
-- 不支持媒体
+- 支持媒体：image、file、audio、video
 - 不支持 block streaming
 - ACK mode 为 `typing`
 

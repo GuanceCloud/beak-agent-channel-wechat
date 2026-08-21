@@ -2,9 +2,14 @@ package weixin
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +113,90 @@ func TestSendTextRequiresContextToken(t *testing.T) {
 	err := client.SendText(context.Background(), "peer-1", "hello", "")
 	if err == nil || !strings.Contains(err.Error(), "context_token") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestSendMediaUploadsLocalPathAndBuildsCDNMessage(t *testing.T) {
+	var encrypted []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ilink/bot/getuploadurl":
+			var request getUploadURLRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.MediaType != 1 || request.ToUserID != "peer-1" || request.RawSize != 5 || request.FileSize != 16 || !request.NoNeedThumb || len(request.AESKey) != 32 {
+				t.Fatalf("upload request=%+v", request)
+			}
+			_ = json.NewEncoder(w).Encode(getUploadURLResponse{UploadParam: "upload-param"})
+		case "/cdn/upload":
+			var err error
+			encrypted, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.URL.Query().Get("encrypted_query_param") != "upload-param" || r.URL.Query().Get("filekey") == "" {
+				t.Fatalf("upload query=%s", r.URL.RawQuery)
+			}
+			w.Header().Set("x-encrypted-param", "download-param")
+			w.WriteHeader(http.StatusOK)
+		case "/ilink/bot/sendmessage":
+			var request SendMessageRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if len(request.Message.ItemList) != 1 || request.Message.ItemList[0].Type != MessageItemTypeImage || request.Message.ItemList[0].ImageItem == nil {
+				t.Fatalf("message=%+v", request.Message)
+			}
+			media := request.Message.ItemList[0].ImageItem.Media
+			if media == nil || media.EncryptQueryParam != "download-param" || media.AESKey == "" || request.Message.ItemList[0].ImageItem.MidSize != 16 {
+				t.Fatalf("media=%+v", media)
+			}
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{Ret: 0})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "image.png")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(server.URL, "token-1")
+	client.CDNBaseURL = server.URL + "/cdn"
+	if err := client.SendMedia(context.Background(), SendMediaRequest{ToUserID: "peer-1", Kind: "image", Path: path, ContextToken: "ctx-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(encrypted) != 16 || string(encrypted) == "hello" {
+		t.Fatalf("encrypted upload=%x", encrypted)
+	}
+}
+
+func TestDownloadMediaDecryptsCDNResource(t *testing.T) {
+	key := []byte("0123456789abcdef")
+	ciphertext, err := encryptAESECB([]byte("hello"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/download" || r.URL.Query().Get("encrypted_query_param") != "download-param" {
+			t.Fatalf("download request=%s", r.URL.String())
+		}
+		_, _ = w.Write(ciphertext)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token-1")
+	client.CDNBaseURL = server.URL
+	path, cleanup, err := client.DownloadMedia(context.Background(), CDNMedia{EncryptQueryParam: "download-param", AESKey: base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(key)))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("path=%q data=%q err=%v", path, data, err)
 	}
 }
 

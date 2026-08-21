@@ -891,6 +891,10 @@ func (f *fakeWeixin) GetUpdates(context.Context, string, time.Duration) (*weixin
 	return &weixin.GetUpdatesResponse{}, nil
 }
 
+func (f *fakeWeixin) DownloadMedia(context.Context, weixin.CDNMedia) (string, func(), error) {
+	return "", nil, errors.New("fake media download not configured")
+}
+
 func (f *fakeWeixin) SendText(_ context.Context, toUserID, text, contextToken string) error {
 	if f.sendErr != nil {
 		return f.sendErr

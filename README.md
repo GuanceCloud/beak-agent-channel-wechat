@@ -11,8 +11,9 @@ This repository is importable library code. It is not a CLI, does not read user-
 - Generic `sdk.Connector` implementation exposed by `beakweixin.NewConnector()`.
 - Tencent iLink QR login for Weixin bot accounts.
 - Host-backed credential and state persistence.
-- Text-only inbound Weixin messages from `ilink/bot/getupdates` to Beak sessions.
+- Inbound Weixin text and media messages from `ilink/bot/getupdates` to Beak sessions; media is downloaded and decrypted into a temporary local path before the host imports it.
 - Text or markdown-formatted Beak agent output back to Weixin through `connector.Send` / `ilink/bot/sendmessage`; markdown uses the same common fields and falls back to text inside the SDK.
+- Text or media-only Beak agent output through `connector.Send`; local attachments are encrypted, uploaded to the iLink CDN, and sent as native image/video/file items.
 - Lightweight processing acknowledgement through `Acknowledge`; Weixin maps it to typing start/stop through `getconfig` and `sendtyping`.
 - Direct chat and explicit group chat normalization.
 - Standard `bot_identity` state for unified SDK exposure, while account identity remains the stable `ilink_user_id` when available.
@@ -20,7 +21,7 @@ This repository is importable library code. It is not a CLI, does not read user-
 - If multiple Weixin bot accounts are in the same group, each bot account creates or reuses its own Beak session for that group.
 - The bot account connection is stored as `channel_accounts`; starting it does not create a task or an extra link session.
 
-Out of v1 scope for this Weixin SDK: media, voice, and CDN/AES media upload/download.
+The common media scope includes image, file, audio, and video attachments. iLink CDN/AES upload and download remain SDK-internal; the Beak host receives only the normalized local-path attachment contract.
 
 ## OpenClaw Reference Alignment
 
@@ -69,7 +70,7 @@ The Weixin connector metadata is returned from `connector.Metadata()`:
 - login mode `qr_code`
 - text direct chat enabled
 - text group chat enabled when incoming iLink payloads carry an explicit `group_id`
-- media disabled
+- media enabled for image, file, audio, and video attachments
 - block streaming disabled
 - ack mode `typing`
 

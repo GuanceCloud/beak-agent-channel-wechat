@@ -44,6 +44,7 @@ func (c Connector) Metadata() sdk.ConnectorMetadata {
 			LoginModes:       []string{sdk.LoginModeQRCode},
 			Text:             caps.Text,
 			Media:            caps.Media,
+			MediaKinds:       append([]string(nil), caps.MediaKinds...),
 			GroupChat:        true,
 			DirectChat:       caps.DirectChat,
 			Stream:           true,
@@ -177,6 +178,62 @@ func (c Connector) Send(ctx context.Context, runtime sdk.Runtime, req sdk.Outbou
 		return nil, err
 	}
 	text := weixinOutboundMentionText(req)
+	if strings.TrimSpace(text) == "" && len(req.Attachments) == 0 {
+		return nil, fmt.Errorf("weixin outbound text or attachments are required")
+	}
+	if len(req.Attachments) > 0 {
+		result := &sdk.SendResult{Platform: Platform, AccountUUID: accountID, Raw: map[string]any{"delivery_method": "ilink"}}
+		if strings.TrimSpace(text) != "" {
+			textReq := req
+			textReq.Attachments = nil
+			textResult, textErr := c.Send(ctx, runtime, textReq)
+			if textErr != nil {
+				return nil, textErr
+			}
+			result.MessageID = textResult.MessageID
+		}
+		var attachmentErrors []string
+		for index, attachment := range req.Attachments {
+			item := sdk.AttachmentSendResult{AttachmentID: attachment.ID, Kind: attachment.Kind, Status: sdk.AttachmentStatusFailed}
+			if validateErr := sdk.ValidateMediaAttachment(attachment); validateErr != nil {
+				item.Error = validateErr.Error()
+				attachmentErrors = append(attachmentErrors, item.Error)
+				result.AttachmentResults = append(result.AttachmentResults, item)
+				continue
+			}
+			mediaPath := strings.TrimSpace(attachment.Path)
+			mediaURL := strings.TrimSpace(attachment.URL)
+			if mediaPath == "" && mediaURL == "" {
+				item.Error = "weixin outbound attachments require a local path or HTTP URL"
+				attachmentErrors = append(attachmentErrors, item.Error)
+				result.AttachmentResults = append(result.AttachmentResults, item)
+				continue
+			}
+			clientID := strings.TrimSpace(req.MessageUUID)
+			if clientID != "" {
+				clientID = clientID + "-media-" + strconv.Itoa(index)
+			}
+			mediaResult, sendErr := c.channel.SendAttachment(ctx, native, SendAttachmentRequest{AccountID: accountID, ToUserID: toUserID, Kind: attachment.Kind, Path: mediaPath, URL: mediaURL, FileName: attachment.FileName, ContentType: attachment.ContentType, ContextToken: accountState.ContextTokens[contextKey], ClientID: clientID})
+			if sendErr != nil {
+				item.Error = sendErr.Error()
+				attachmentErrors = append(attachmentErrors, item.Error)
+				result.AttachmentResults = append(result.AttachmentResults, item)
+				continue
+			}
+			item.Status = sdk.AttachmentStatusSent
+			item.MessageID = firstString(mediaResult.MessageID, clientID, attachment.ID)
+			item.PlatformResourceID = firstString(mediaResult.MessageID, clientID)
+			result.MessageID = item.MessageID
+			result.AttachmentResults = append(result.AttachmentResults, item)
+		}
+		if len(attachmentErrors) > 0 {
+			result.Raw["attachment_errors"] = attachmentErrors
+		}
+		if result.MessageID == "" {
+			return result, fmt.Errorf("%s outbound attachments failed", Platform)
+		}
+		return result, nil
+	}
 	chunks := weixin.SplitText(text, weixin.MaxTextRunes)
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("weixin outbound text is required")
@@ -1044,6 +1101,7 @@ func (a gatewayRuntimeAdapter) CreateWeixinUserMessage(ctx context.Context, sess
 		SessionUUID:   sessionUUID,
 		SenderID:      msg.SenderID,
 		Content:       msg.Content,
+		Attachments:   msg.Attachments,
 		DedupeKey:     msg.DedupeKey,
 		Metadata:      msg.Metadata,
 	})

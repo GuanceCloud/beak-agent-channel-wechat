@@ -45,7 +45,11 @@ const (
 	MessageStateGenerating = 1
 	MessageStateFinish     = 2
 
-	MessageItemTypeText = 1
+	MessageItemTypeText  = 1
+	MessageItemTypeImage = 2
+	MessageItemTypeVoice = 3
+	MessageItemTypeFile  = 4
+	MessageItemTypeVideo = 5
 
 	TypingStatusStart = 1
 	TypingStatusStop  = 2
@@ -59,9 +63,53 @@ type TextItem struct {
 }
 
 type MessageItem struct {
-	Type     int       `json:"type,omitempty"`
-	TextItem *TextItem `json:"text_item,omitempty"`
-	RefMsg   *RefMsg   `json:"ref_msg,omitempty"`
+	Type      int        `json:"type,omitempty"`
+	TextItem  *TextItem  `json:"text_item,omitempty"`
+	ImageItem *ImageItem `json:"image_item,omitempty"`
+	VoiceItem *VoiceItem `json:"voice_item,omitempty"`
+	FileItem  *FileItem  `json:"file_item,omitempty"`
+	VideoItem *VideoItem `json:"video_item,omitempty"`
+	RefMsg    *RefMsg    `json:"ref_msg,omitempty"`
+}
+
+// CDNMedia is the encrypted resource reference used by iLink for media
+// messages. FullURL is accepted for newer gateways that return a complete
+// download URL instead of an encrypted query parameter.
+type CDNMedia struct {
+	EncryptQueryParam string `json:"encrypt_query_param,omitempty"`
+	AESKey            string `json:"aes_key,omitempty"`
+	EncryptType       int    `json:"encrypt_type,omitempty"`
+	FullURL           string `json:"full_url,omitempty"`
+}
+
+type ImageItem struct {
+	Media      *CDNMedia `json:"media,omitempty"`
+	ThumbMedia *CDNMedia `json:"thumb_media,omitempty"`
+	AESKey     string    `json:"aeskey,omitempty"`
+	URL        string    `json:"url,omitempty"`
+	MidSize    int64     `json:"mid_size,omitempty"`
+	ThumbSize  int64     `json:"thumb_size,omitempty"`
+}
+
+type VoiceItem struct {
+	Media      *CDNMedia `json:"media,omitempty"`
+	EncodeType int       `json:"encode_type,omitempty"`
+	PlayTime   int64     `json:"playtime,omitempty"`
+	Text       string    `json:"text,omitempty"`
+}
+
+type FileItem struct {
+	Media    *CDNMedia `json:"media,omitempty"`
+	FileName string    `json:"file_name,omitempty"`
+	MD5      string    `json:"md5,omitempty"`
+	Len      string    `json:"len,omitempty"`
+}
+
+type VideoItem struct {
+	Media      *CDNMedia `json:"media,omitempty"`
+	ThumbMedia *CDNMedia `json:"thumb_media,omitempty"`
+	VideoSize  int64     `json:"video_size,omitempty"`
+	PlayLength int64     `json:"play_length,omitempty"`
 }
 
 type RefMsg struct {
@@ -153,8 +201,22 @@ func (c ChatIdentity) StateKey() string {
 
 func (m WeixinMessage) Text() string {
 	for _, item := range m.ItemList {
-		if item.Type == MessageItemTypeText && item.TextItem != nil {
-			return item.TextItem.Text
+		switch item.Type {
+		case MessageItemTypeText:
+			if item.TextItem != nil {
+				return item.TextItem.Text
+			}
+		case MessageItemTypeImage:
+			return "[图片]"
+		case MessageItemTypeVoice:
+			if item.VoiceItem != nil && strings.TrimSpace(item.VoiceItem.Text) != "" {
+				return item.VoiceItem.Text
+			}
+			return "[音频]"
+		case MessageItemTypeVideo:
+			return "[视频]"
+		case MessageItemTypeFile:
+			return "[文件]"
 		}
 	}
 	return ""
@@ -196,6 +258,17 @@ type SendMessageResponse struct {
 	Ret     int    `json:"ret,omitempty"`
 	ErrCode int    `json:"errcode,omitempty"`
 	ErrMsg  string `json:"errmsg,omitempty"`
+}
+
+type SendMediaRequest struct {
+	ToUserID     string
+	Kind         string
+	Path         string
+	URL          string
+	FileName     string
+	ContentType  string
+	ContextToken string
+	ClientID     string
 }
 
 type GetConfigRequest struct {

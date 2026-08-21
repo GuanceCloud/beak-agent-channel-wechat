@@ -26,7 +26,7 @@ func TestPluginRegistersWeixinChannelWithNoSettings(t *testing.T) {
 		t.Fatalf("schema=%+v", schema)
 	}
 	capabilities := api.channel.Capabilities()
-	if !capabilities.DirectChat || !capabilities.Text || capabilities.Media {
+	if !capabilities.DirectChat || !capabilities.Text || !capabilities.Media {
 		t.Fatalf("capabilities=%+v", capabilities)
 	}
 }

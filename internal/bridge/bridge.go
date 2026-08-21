@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 type WeixinClient interface {
 	GetUpdates(ctx context.Context, getUpdatesBuf string, timeout time.Duration) (*weixin.GetUpdatesResponse, error)
+	DownloadMedia(ctx context.Context, media weixin.CDNMedia) (string, func(), error)
 	SendText(ctx context.Context, toUserID, text, contextToken string) error
 	GetTypingTicket(ctx context.Context, ilinkUserID, contextToken string) (string, error)
 	SendTyping(ctx context.Context, ilinkUserID, typingTicket string, status int) error
@@ -255,7 +257,15 @@ func (r *AccountRunner) processUpdate(ctx context.Context, msg weixin.WeixinMess
 	if msg.MessageState != 0 && msg.MessageState != weixin.MessageStateFinish {
 		return processUpdateResult{skipReason: fmt.Sprintf("message_state_%d", msg.MessageState)}
 	}
+	attachments, cleanup, attachmentErrors := r.downloadWeixinMessageAttachments(ctx, msg)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	inbound := BuildInboundMessage(r.options.WorkspaceRef, r.options.ChannelUUID, r.account.AccountID, msg, text)
+	inbound.Attachments = attachments
+	if len(attachmentErrors) > 0 {
+		inbound.Raw["attachment_errors"] = attachmentErrors
+	}
 	if text == "" && !inbound.MentionedMe {
 		return processUpdateResult{skipReason: "empty_text_without_mention"}
 	}
@@ -286,6 +296,7 @@ func (r *AccountRunner) processUpdate(ctx context.Context, msg weixin.WeixinMess
 		WorkspaceUUID: r.options.WorkspaceRef,
 		SenderID:      beak.IMUserParticipantID(beak.PlatformWeixin, chat.ChatType, chat.ChatID, chat.SenderID),
 		Content:       text,
+		Attachments:   attachments,
 		DedupeKey:     key,
 		Metadata: map[string]any{
 			"source":             "weixin",
@@ -301,6 +312,7 @@ func (r *AccountRunner) processUpdate(ctx context.Context, msg weixin.WeixinMess
 			"weixin_session_id":  msg.SessionID,
 			"weixin_group_id":    msg.GroupID,
 			"inbound_message":    inbound,
+			"attachment_errors":  attachmentErrors,
 		},
 	})
 	if err != nil {
@@ -329,6 +341,73 @@ func (r *AccountRunner) processUpdate(ctx context.Context, msg weixin.WeixinMess
 		r.logger.Printf("send typing start account=%s peer=%s error=%v", r.account.AccountID, chatKey, err)
 	}
 	return processUpdateResult{sessionUUID: sessionUUID, processed: true}
+}
+
+func (r *AccountRunner) downloadWeixinMessageAttachments(ctx context.Context, msg weixin.WeixinMessage) ([]sdk.MediaAttachment, func(), []string) {
+	attachments := make([]sdk.MediaAttachment, 0, len(msg.ItemList))
+	cleanups := make([]func(), 0, len(msg.ItemList))
+	var errors []string
+	cleanup := func() {
+		for index := len(cleanups) - 1; index >= 0; index-- {
+			if cleanups[index] != nil {
+				cleanups[index]()
+			}
+		}
+	}
+	for _, item := range msg.ItemList {
+		kind := ""
+		var media *weixin.CDNMedia
+		fileName := ""
+		platformID := ""
+		switch item.Type {
+		case weixin.MessageItemTypeImage:
+			kind = sdk.MediaKindImage
+			if item.ImageItem != nil {
+				media = item.ImageItem.Media
+				platformID = item.ImageItem.URL
+				if media == nil && strings.TrimSpace(item.ImageItem.URL) != "" {
+					media = &weixin.CDNMedia{FullURL: item.ImageItem.URL}
+				}
+			}
+		case weixin.MessageItemTypeVoice:
+			kind = sdk.MediaKindAudio
+			if item.VoiceItem != nil {
+				media = item.VoiceItem.Media
+			}
+		case weixin.MessageItemTypeVideo:
+			kind = sdk.MediaKindVideo
+			if item.VideoItem != nil {
+				media = item.VideoItem.Media
+			}
+		case weixin.MessageItemTypeFile:
+			kind = sdk.MediaKindFile
+			if item.FileItem != nil {
+				media = item.FileItem.Media
+				fileName = item.FileItem.FileName
+			}
+		}
+		if media == nil {
+			continue
+		}
+		if platformID == "" {
+			platformID = media.FullURL
+		}
+		if platformID == "" {
+			platformID = media.EncryptQueryParam
+		}
+		path, remove, err := r.wx.DownloadMedia(ctx, *media)
+		if err != nil {
+			errors = append(errors, err.Error())
+			continue
+		}
+		cleanups = append(cleanups, remove)
+		var size int64
+		if info, statErr := os.Stat(path); statErr == nil {
+			size = info.Size()
+		}
+		attachments = append(attachments, sdk.MediaAttachment{ID: platformID, Kind: kind, Source: sdk.MediaSourcePath, Path: path, FileName: fileName, SizeBytes: size, PlatformResourceID: platformID})
+	}
+	return attachments, cleanup, errors
 }
 
 func BuildInboundMessage(workspaceRef, channelUUID, accountID string, msg weixin.WeixinMessage, text string) sdk.InboundMessage {

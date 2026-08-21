@@ -3,9 +3,12 @@ package weixin
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +33,8 @@ const (
 	defaultBotAgent       = DefaultBotAgent
 	defaultAPITimeout     = 15 * time.Second
 	defaultLongPoll       = 35 * time.Second
+	defaultCDNBaseURL     = "https://novac2c.cdn.weixin.qq.com/c2c"
+	maxMediaBytes         = 64 << 20
 	sessionExpiredErrCode = -14
 )
 
@@ -43,6 +49,7 @@ type Client struct {
 	AppClientVersion string
 	RequestTimeout   time.Duration
 	HTTPClient       *http.Client
+	CDNBaseURL       string
 }
 
 func NewClient(baseURL, token string) *Client {
@@ -59,6 +66,7 @@ func NewClient(baseURL, token string) *Client {
 		AppClientVersion: strconv.Itoa(buildClientVersion(defaultClientVersion)),
 		RequestTimeout:   defaultAPITimeout,
 		HTTPClient:       http.DefaultClient,
+		CDNBaseURL:       defaultCDNBaseURL,
 	}
 }
 
@@ -152,6 +160,366 @@ func (c *Client) SendTextWithClientID(ctx context.Context, toUserID, text, conte
 		}
 	}
 	return nil
+}
+
+func (c *Client) SendMedia(ctx context.Context, req SendMediaRequest) error {
+	if strings.TrimSpace(req.ToUserID) == "" {
+		return fmt.Errorf("to_user_id is required")
+	}
+	if strings.TrimSpace(req.ContextToken) == "" {
+		return fmt.Errorf("context_token is required")
+	}
+	path, cleanup, err := c.resolveMediaPath(ctx, req.Path, req.URL)
+	if err != nil {
+		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+	uploaded, err := c.uploadMedia(ctx, req.ToUserID, req.Kind, path)
+	if err != nil {
+		return err
+	}
+	item := uploaded.messageItem(req.Kind, req.FileName)
+	if strings.TrimSpace(req.ClientID) == "" {
+		req.ClientID = newClientID()
+	}
+	body := SendMessageRequest{Message: WeixinMessage{ToUserID: req.ToUserID, ClientID: req.ClientID, MessageType: MessageTypeBot, MessageState: MessageStateFinish, ContextToken: req.ContextToken, ItemList: []MessageItem{item}}, BaseInfo: c.baseInfo()}
+	var resp SendMessageResponse
+	timeout := c.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultAPITimeout
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := c.doPOST(reqCtx, "ilink/bot/sendmessage", body, &resp); err != nil {
+		return err
+	}
+	if resp.ErrCode == sessionExpiredErrCode {
+		return NewSessionExpiredError("sendmessage", resp.ErrCode, resp.ErrMsg)
+	}
+	if resp.Ret != 0 || resp.ErrCode != 0 {
+		return fmt.Errorf("send media failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
+	}
+	return nil
+}
+
+// DownloadMedia downloads and, when needed, decrypts an iLink CDN resource to
+// a temporary file. The caller owns the returned cleanup function and must
+// keep the file alive until the host has imported it.
+func (c *Client) DownloadMedia(ctx context.Context, media CDNMedia) (string, func(), error) {
+	endpoint := strings.TrimSpace(media.FullURL)
+	if endpoint == "" && strings.TrimSpace(media.EncryptQueryParam) != "" {
+		base := strings.TrimRight(c.CDNBaseURL, "/")
+		if base == "" {
+			base = defaultCDNBaseURL
+		}
+		values := url.Values{}
+		values.Set("encrypted_query_param", media.EncryptQueryParam)
+		endpoint = base + "/download?" + values.Encode()
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", nil, fmt.Errorf("weixin media URL must be absolute HTTP or HTTPS")
+	}
+	return c.downloadMediaURL(ctx, parsed.String(), &media)
+}
+
+type uploadedMedia struct {
+	FileKey                string
+	AESKey                 []byte
+	DownloadEncryptedParam string
+	PlaintextSize          int64
+	CiphertextSize         int64
+}
+
+func (m uploadedMedia) messageItem(kind, fileName string) MessageItem {
+	media := &CDNMedia{
+		EncryptQueryParam: m.DownloadEncryptedParam,
+		// iLink clients decode this as base64(hex(aes_key)). Keeping the
+		// encoding here avoids leaking platform-specific details to Beak.
+		AESKey:      base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(m.AESKey))),
+		EncryptType: 1,
+	}
+	switch strings.TrimSpace(kind) {
+	case "image", "sticker":
+		return MessageItem{Type: MessageItemTypeImage, ImageItem: &ImageItem{Media: media, MidSize: m.CiphertextSize}}
+	case "audio":
+		return MessageItem{Type: MessageItemTypeVoice, VoiceItem: &VoiceItem{Media: media}}
+	case "video":
+		return MessageItem{Type: MessageItemTypeVideo, VideoItem: &VideoItem{Media: media, VideoSize: m.CiphertextSize}}
+	default:
+		return MessageItem{Type: MessageItemTypeFile, FileItem: &FileItem{Media: media, FileName: fileName, Len: strconv.FormatInt(m.PlaintextSize, 10)}}
+	}
+}
+
+type getUploadURLRequest struct {
+	FileKey     string   `json:"filekey"`
+	MediaType   int      `json:"media_type"`
+	ToUserID    string   `json:"to_user_id"`
+	RawSize     int64    `json:"rawsize"`
+	RawFileMD5  string   `json:"rawfilemd5"`
+	FileSize    int64    `json:"filesize"`
+	NoNeedThumb bool     `json:"no_need_thumb"`
+	AESKey      string   `json:"aeskey"`
+	BaseInfo    BaseInfo `json:"base_info"`
+}
+
+type getUploadURLResponse struct {
+	Ret           int    `json:"ret,omitempty"`
+	ErrCode       int    `json:"errcode,omitempty"`
+	ErrMsg        string `json:"errmsg,omitempty"`
+	UploadParam   string `json:"upload_param,omitempty"`
+	UploadFullURL string `json:"upload_full_url,omitempty"`
+}
+
+func (c *Client) uploadMedia(ctx context.Context, toUserID, kind, path string) (uploadedMedia, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return uploadedMedia{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return uploadedMedia{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return uploadedMedia{}, fmt.Errorf("media path is not a regular file")
+	}
+	if info.Size() > maxMediaBytes {
+		return uploadedMedia{}, fmt.Errorf("weixin media exceeds %d bytes", maxMediaBytes)
+	}
+	plaintext, err := io.ReadAll(io.LimitReader(file, maxMediaBytes+1))
+	if err != nil {
+		return uploadedMedia{}, err
+	}
+	if int64(len(plaintext)) > maxMediaBytes {
+		return uploadedMedia{}, fmt.Errorf("weixin media exceeds %d bytes", maxMediaBytes)
+	}
+	key := make([]byte, aes.BlockSize)
+	if _, err := rand.Read(key); err != nil {
+		return uploadedMedia{}, err
+	}
+	ciphertext, err := encryptAESECB(plaintext, key)
+	if err != nil {
+		return uploadedMedia{}, err
+	}
+	fileKeyBytes := make([]byte, 16)
+	if _, err := rand.Read(fileKeyBytes); err != nil {
+		return uploadedMedia{}, err
+	}
+	fileKey := hex.EncodeToString(fileKeyBytes)
+	mediaType := uploadMediaType(kind)
+	request := getUploadURLRequest{
+		FileKey:     fileKey,
+		MediaType:   mediaType,
+		ToUserID:    toUserID,
+		RawSize:     int64(len(plaintext)),
+		RawFileMD5:  fmt.Sprintf("%x", md5.Sum(plaintext)),
+		FileSize:    int64(len(ciphertext)),
+		NoNeedThumb: true,
+		AESKey:      hex.EncodeToString(key),
+		BaseInfo:    c.baseInfo(),
+	}
+	var response getUploadURLResponse
+	if err := c.doPOST(ctx, "ilink/bot/getuploadurl", request, &response); err != nil {
+		return uploadedMedia{}, err
+	}
+	if response.Ret != 0 || response.ErrCode != 0 {
+		return uploadedMedia{}, fmt.Errorf("get upload URL failed: ret=%d errcode=%d errmsg=%s", response.Ret, response.ErrCode, response.ErrMsg)
+	}
+	if response.UploadParam == "" && response.UploadFullURL == "" {
+		return uploadedMedia{}, fmt.Errorf("get upload URL returned no upload parameter")
+	}
+	downloadParam, err := c.uploadCDN(ctx, fileKey, response, ciphertext)
+	if err != nil {
+		return uploadedMedia{}, err
+	}
+	return uploadedMedia{FileKey: fileKey, AESKey: key, DownloadEncryptedParam: downloadParam, PlaintextSize: int64(len(plaintext)), CiphertextSize: int64(len(ciphertext))}, nil
+}
+
+func uploadMediaType(kind string) int {
+	switch strings.TrimSpace(kind) {
+	case "image", "sticker":
+		return 1
+	case "video":
+		return 2
+	case "audio":
+		return 4
+	default:
+		return 3
+	}
+}
+
+func (c *Client) uploadCDN(ctx context.Context, fileKey string, response getUploadURLResponse, ciphertext []byte) (string, error) {
+	endpoint := strings.TrimSpace(response.UploadFullURL)
+	if endpoint == "" {
+		base := strings.TrimRight(c.CDNBaseURL, "/")
+		if base == "" {
+			base = defaultCDNBaseURL
+		}
+		values := url.Values{}
+		values.Set("encrypted_query_param", response.UploadParam)
+		values.Set("filekey", fileKey)
+		endpoint = base + "/upload?" + values.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(ciphertext))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("weixin CDN upload failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	param := strings.TrimSpace(resp.Header.Get("x-encrypted-param"))
+	if param == "" {
+		return "", fmt.Errorf("weixin CDN upload returned no encrypted parameter")
+	}
+	return param, nil
+}
+
+func encryptAESECB(plaintext, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	padding := aes.BlockSize - len(plaintext)%aes.BlockSize
+	padded := make([]byte, len(plaintext)+padding)
+	copy(padded, plaintext)
+	for index := len(plaintext); index < len(padded); index++ {
+		padded[index] = byte(padding)
+	}
+	ciphertext := make([]byte, len(padded))
+	for offset := 0; offset < len(padded); offset += aes.BlockSize {
+		block.Encrypt(ciphertext[offset:offset+aes.BlockSize], padded[offset:offset+aes.BlockSize])
+	}
+	return ciphertext, nil
+}
+
+func decryptAESECB(ciphertext, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("invalid AES-ECB ciphertext size")
+	}
+	plaintext := make([]byte, len(ciphertext))
+	for offset := 0; offset < len(ciphertext); offset += aes.BlockSize {
+		block.Decrypt(plaintext[offset:offset+aes.BlockSize], ciphertext[offset:offset+aes.BlockSize])
+	}
+	padding := int(plaintext[len(plaintext)-1])
+	if padding == 0 || padding > aes.BlockSize || padding > len(plaintext) {
+		return nil, fmt.Errorf("invalid AES-ECB padding")
+	}
+	for _, value := range plaintext[len(plaintext)-padding:] {
+		if int(value) != padding {
+			return nil, fmt.Errorf("invalid AES-ECB padding")
+		}
+	}
+	return plaintext[:len(plaintext)-padding], nil
+}
+
+func (c *Client) resolveMediaPath(ctx context.Context, path, rawURL string) (string, func(), error) {
+	if strings.TrimSpace(path) != "" {
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return "", nil, fmt.Errorf("media path is not a regular file")
+		}
+		return path, nil, nil
+	}
+	if strings.TrimSpace(rawURL) == "" {
+		return "", nil, fmt.Errorf("media path is required")
+	}
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", nil, fmt.Errorf("media URL must be absolute HTTP or HTTPS")
+	}
+	return c.downloadMediaURL(ctx, parsed.String(), nil)
+}
+
+func (c *Client) downloadMediaURL(ctx context.Context, rawURL string, media *CDNMedia) (string, func(), error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", nil, fmt.Errorf("weixin media download failed: status=%d", resp.StatusCode)
+	}
+	ciphertext, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaBytes+aes.BlockSize+1))
+	if err != nil {
+		return "", nil, err
+	}
+	data := ciphertext
+	if media != nil && strings.TrimSpace(media.AESKey) != "" {
+		key, err := decodeAESKey(media.AESKey)
+		if err != nil {
+			return "", nil, err
+		}
+		data, err = decryptAESECB(ciphertext, key)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+	if int64(len(data)) > maxMediaBytes {
+		return "", nil, fmt.Errorf("weixin media exceeds %d bytes", maxMediaBytes)
+	}
+	tmp, err := os.CreateTemp("", "beak-weixin-media-*")
+	if err != nil {
+		return "", nil, err
+	}
+	path := tmp.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
+}
+
+func decodeAESKey(value string) ([]byte, error) {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+	if err == nil {
+		if len(decoded) == aes.BlockSize {
+			return decoded, nil
+		}
+		if len(decoded) == aes.BlockSize*2 {
+			if key, hexErr := hex.DecodeString(string(decoded)); hexErr == nil && len(key) == aes.BlockSize {
+				return key, nil
+			}
+		}
+	}
+	if key, hexErr := hex.DecodeString(strings.TrimSpace(value)); hexErr == nil && len(key) == aes.BlockSize {
+		return key, nil
+	}
+	return nil, fmt.Errorf("invalid Weixin AES key")
 }
 
 func (c *Client) sendTextChunk(ctx context.Context, toUserID, text, contextToken, clientID string) error {

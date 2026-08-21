@@ -14,6 +14,7 @@ import (
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/beak"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/bridge"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/internal/weixin"
+	"github.com/GuanceCloud/beak-agent-channel-wechat/sdk"
 	"github.com/GuanceCloud/beak-agent-channel-wechat/state"
 )
 
@@ -57,18 +58,31 @@ type BeakChatRuntime interface {
 }
 
 type UserMessage struct {
-	AccountID  string
-	PeerUserID string
-	SenderID   string
-	Content    string
-	DedupeKey  string
-	Metadata   map[string]any
+	AccountID   string
+	PeerUserID  string
+	SenderID    string
+	Content     string
+	Attachments []sdk.MediaAttachment
+	DedupeKey   string
+	Metadata    map[string]any
 }
 
 type SendTextRequest struct {
 	AccountID    string
 	ToUserID     string
 	Text         string
+	ContextToken string
+	ClientID     string
+}
+
+type SendAttachmentRequest struct {
+	AccountID    string
+	ToUserID     string
+	Kind         string
+	Path         string
+	URL          string
+	FileName     string
+	ContentType  string
 	ContextToken string
 	ClientID     string
 }
@@ -385,7 +399,30 @@ func (c *Client) SendText(ctx context.Context, req SendTextRequest) (*SendTextRe
 	if err := wxClient.SendTextWithClientID(ctx, req.ToUserID, req.Text, contextToken, req.ClientID); err != nil {
 		return nil, err
 	}
-	return &SendTextResult{Channel: "weixin", AccountID: accountID}, nil
+	return &SendTextResult{Channel: "weixin", AccountID: accountID, MessageID: req.ClientID}, nil
+}
+
+func (c *Client) SendAttachment(ctx context.Context, req SendAttachmentRequest) (*SendTextResult, error) {
+	accountID, account, err := c.resolveOutboundAccount(ctx, req.AccountID, req.ToUserID)
+	if err != nil {
+		return nil, err
+	}
+	if account.BotToken == "" {
+		return nil, fmt.Errorf("weixin account %s is not logged in", accountID)
+	}
+	contextToken := req.ContextToken
+	if contextToken == "" {
+		contextToken = account.ContextTokens[req.ToUserID]
+	}
+	wxCfg := c.weixinRuntimeConfig()
+	if account.BaseURL != "" {
+		wxCfg.BaseURL = account.BaseURL
+	}
+	wxClient := c.newWeixinClient(wxCfg, account.BotToken)
+	if err := wxClient.SendMedia(ctx, weixin.SendMediaRequest{ToUserID: req.ToUserID, Kind: req.Kind, Path: req.Path, URL: req.URL, FileName: req.FileName, ContentType: req.ContentType, ContextToken: contextToken, ClientID: req.ClientID}); err != nil {
+		return nil, err
+	}
+	return &SendTextResult{Channel: "weixin", AccountID: accountID, MessageID: req.ClientID}, nil
 }
 
 func Run(ctx context.Context, options Options, opts ...Option) error {
@@ -513,12 +550,13 @@ func (a runtimeBridgeAdapter) EnsureChatSession(ctx context.Context, _ string, a
 
 func (a runtimeBridgeAdapter) CreateMessage(ctx context.Context, sessionUUID string, req beak.CreateMessageRequest) (*beak.CreateMessageResponse, error) {
 	msg := UserMessage{
-		AccountID:  metadataString(req.Metadata, "weixin_account_id"),
-		PeerUserID: metadataString(req.Metadata, "weixin_peer_id"),
-		SenderID:   req.SenderID,
-		Content:    req.Content,
-		DedupeKey:  req.DedupeKey,
-		Metadata:   req.Metadata,
+		AccountID:   metadataString(req.Metadata, "weixin_account_id"),
+		PeerUserID:  metadataString(req.Metadata, "weixin_peer_id"),
+		SenderID:    req.SenderID,
+		Content:     req.Content,
+		Attachments: req.Attachments,
+		DedupeKey:   req.DedupeKey,
+		Metadata:    req.Metadata,
 	}
 	if msg.PeerUserID == "" {
 		msg.PeerUserID = strings.TrimPrefix(req.SenderID, "user:weixin:")

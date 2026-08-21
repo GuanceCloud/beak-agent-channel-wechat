@@ -27,7 +27,7 @@ func TestWeixinConnectorMetadataAndSchema(t *testing.T) {
 	if metadata.ID != ID || metadata.Platform != Platform || metadata.Label != "Weixin" {
 		t.Fatalf("metadata=%+v", metadata)
 	}
-	if !metadata.Capabilities.Text || !metadata.Capabilities.DirectChat || !metadata.Capabilities.GroupChat || metadata.Capabilities.Media {
+	if !metadata.Capabilities.Text || !metadata.Capabilities.DirectChat || !metadata.Capabilities.GroupChat || !metadata.Capabilities.Media {
 		t.Fatalf("capabilities=%+v", metadata.Capabilities)
 	}
 	if !metadata.Capabilities.Stream || metadata.Capabilities.Webhook {
@@ -843,7 +843,7 @@ func TestWeixinConnectorSendRejectsEmptyText(t *testing.T) {
 		ChatType:    sdk.ChatTypeGroup,
 		ChatID:      "group-1",
 	})
-	if err == nil || result != nil || !strings.Contains(err.Error(), "text is required") {
+	if err == nil || result != nil || !strings.Contains(err.Error(), "text or attachments are required") {
 		t.Fatalf("result=%+v error=%v, want empty text rejection", result, err)
 	}
 }
