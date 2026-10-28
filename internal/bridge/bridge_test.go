@@ -524,15 +524,14 @@ func TestStreamLoopMarksEOFAsReconnecting(t *testing.T) {
 	waitForCondition(t, 100*time.Millisecond, func() bool {
 		runner.mu.Lock()
 		defer runner.mu.Unlock()
-		return account.StreamConnectionState != ""
+		return account.SessionStreamHealth["sess-1"].State != ""
 	})
 	runner.mu.Lock()
-	connectionState := account.StreamConnectionState
-	disconnectedAt := account.StreamDisconnectedAt
+	health := account.SessionStreamHealth["sess-1"]
 	runner.mu.Unlock()
-	if connectionState != sdk.RuntimeHealthStateReconnecting || disconnectedAt.IsZero() {
+	if health.State != sdk.RuntimeHealthStateReconnecting || health.UpdatedAt.IsZero() {
 		cancel()
-		t.Fatalf("clean stream EOF should move to reconnecting, state=%q disconnected_at=%v", connectionState, disconnectedAt)
+		t.Fatalf("clean session stream EOF should move to reconnecting: %+v", health)
 	}
 	if got := runner.beak.(*fakeBeak).streamCallCount(); got != 1 {
 		cancel()
@@ -548,24 +547,20 @@ func TestStreamLoopMarksEOFAsReconnecting(t *testing.T) {
 
 func TestProcessStreamHeartbeatMarksConnected(t *testing.T) {
 	store := newMemoryStore()
-	account := &state.AccountState{
-		AccountID:                  "account-1",
-		StreamConnectionState:      sdk.RuntimeHealthStateReconnectFailed,
-		StreamReconnectRequestedAt: time.Now().UTC(),
-		StreamReconnectError:       "stream failed",
-		StreamReconnectErrorAt:     time.Now().UTC(),
-	}
+	account := &state.AccountState{AccountID: "account-1", StreamConnectionState: sdk.RuntimeHealthStateReconnectFailed, StreamLastError: "poll failed"}
 	account.EnsureMaps()
+	account.PeerSessions["peer-1"] = "sess-1"
+	account.SessionStreamHealth["sess-1"] = state.SessionStreamHealth{State: sdk.RuntimeHealthStateReconnectFailed, LastError: "session failed"}
 	runner := testRunner(store, account)
-
 	if err := runner.ProcessStreamEvent(context.Background(), "peer-1", beak.StreamEvent{EventType: "heartbeat"}); err != nil {
 		t.Fatal(err)
 	}
-	if account.StreamConnectionState != sdk.RuntimeHealthStateConnected || account.StreamLastActivityAt.IsZero() {
-		t.Fatalf("heartbeat did not mark stream connected: %+v", account)
+	health := account.SessionStreamHealth["sess-1"]
+	if health.State != sdk.RuntimeHealthStateConnected || health.UpdatedAt.IsZero() || health.LastError != "" {
+		t.Fatalf("session heartbeat did not recover session health: %+v", health)
 	}
-	if !account.StreamReconnectRequestedAt.IsZero() || account.StreamReconnectError != "" || !account.StreamReconnectErrorAt.IsZero() {
-		t.Fatalf("heartbeat kept stale reconnect error after recovery: %+v", account)
+	if account.StreamConnectionState != sdk.RuntimeHealthStateReconnectFailed || account.StreamLastError != "poll failed" {
+		t.Fatalf("session heartbeat changed polling health: %+v", account)
 	}
 }
 

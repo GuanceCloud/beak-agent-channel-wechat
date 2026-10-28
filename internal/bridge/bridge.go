@@ -661,15 +661,11 @@ func (r *AccountRunner) streamLoop(ctx context.Context, peerID, sessionUUID stri
 	if reconnect <= 0 {
 		reconnect = 30 * time.Second
 	}
-	attempt := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-		}
-		if attempt > 0 {
-			_ = r.markStreamReconnecting(ctx)
 		}
 
 		r.mu.Lock()
@@ -687,13 +683,12 @@ func (r *AccountRunner) streamLoop(ctx context.Context, peerID, sessionUUID stri
 			return
 		}
 		if err != nil {
-			_ = r.markStreamReconnectFailed(ctx, err)
+			_ = r.markSessionStream(ctx, sessionUUID, sdk.RuntimeHealthStateReconnectFailed, err)
 			r.logger.Printf("beak stream account=%s session=%s error=%v", r.account.AccountID, sessionUUID, err)
 		} else {
-			_ = r.markStreamDisconnectedForReconnect(ctx)
+			_ = r.markSessionStream(ctx, sessionUUID, sdk.RuntimeHealthStateReconnecting, nil)
 			r.logger.Printf("beak stream account=%s session=%s ended; reconnecting", r.account.AccountID, sessionUUID)
 		}
-		attempt++
 		if !sleepOrDone(ctx, reconnect) {
 			return
 		}
@@ -701,8 +696,16 @@ func (r *AccountRunner) streamLoop(ctx context.Context, peerID, sessionUUID stri
 }
 
 func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, event beak.StreamEvent) error {
+	sessionUUID := event.SessionUUID
+	if sessionUUID == "" {
+		r.mu.Lock()
+		sessionUUID = r.account.PeerSessions[peerID]
+		r.mu.Unlock()
+	}
+	if event.EventType != "error" && sessionUUID != "" {
+		_ = r.markSessionStream(ctx, sessionUUID, sdk.RuntimeHealthStateConnected, nil)
+	}
 	if event.EventType == "heartbeat" || event.EventType == "" {
-		r.markStreamConnectedBestEffort(ctx, event)
 		return nil
 	}
 	if event.EventType == "error" {
@@ -713,13 +716,7 @@ func (r *AccountRunner) ProcessStreamEvent(ctx context.Context, peerID string, e
 	if event.EventType == "message" && err != nil {
 		return err
 	}
-	r.markStreamConnectedBestEffort(ctx, event)
-
 	r.mu.Lock()
-	sessionUUID := event.SessionUUID
-	if sessionUUID == "" {
-		sessionUUID = r.account.PeerSessions[peerID]
-	}
 	if event.EventType != "message" {
 		if event.EventUUID != "" && sessionUUID != "" {
 			r.account.StreamCursors[sessionUUID] = event.EventUUID
@@ -885,6 +882,8 @@ func (r *AccountRunner) markStreamError(ctx context.Context, err error) error {
 	now := time.Now().UTC()
 	r.account.StreamLastError = err.Error()
 	r.account.StreamLastErrorAt = now
+	r.account.StreamConnectionState = sdk.RuntimeHealthStateReconnecting
+	r.account.StreamDisconnectedAt = now
 	saveErr := r.store.SaveAccount(ctx, r.account)
 	r.mu.Unlock()
 	return saveErr
@@ -946,6 +945,36 @@ func updateDiagnosticID(msg weixin.WeixinMessage) string {
 	default:
 		return "unknown"
 	}
+}
+
+// markSessionStream records the Beak event subscription independently of
+// the Weixin polling health used for channel status.
+func (r *AccountRunner) markSessionStream(ctx context.Context, sessionID, status string, cause error) error {
+	if sessionID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.account.EnsureMaps()
+	// Bound the number of retained per-session diagnostics.
+	if len(r.account.SessionStreamHealth) >= 256 {
+		var oldest string
+		var at time.Time
+		for key, value := range r.account.SessionStreamHealth {
+			if oldest == "" || value.UpdatedAt.Before(at) {
+				oldest, at = key, value.UpdatedAt
+			}
+		}
+		if _, exists := r.account.SessionStreamHealth[sessionID]; !exists {
+			delete(r.account.SessionStreamHealth, oldest)
+		}
+	}
+	value := state.SessionStreamHealth{State: status, UpdatedAt: time.Now().UTC()}
+	if cause != nil {
+		value.LastError = cause.Error()
+	}
+	r.account.SessionStreamHealth[sessionID] = value
+	return r.store.SaveAccount(ctx, r.account)
 }
 
 func (r *AccountRunner) markStreamReconnecting(ctx context.Context) error {

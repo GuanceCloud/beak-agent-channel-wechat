@@ -1156,6 +1156,9 @@ func sdkAccountToState(account sdk.ChannelAccount) AccountState {
 	state.InboundSeen = stringMap(account.State["inbound_seen"])
 	state.SentBeakMessages = stringMap(account.State["sent_beak_messages"])
 	state.StreamCursors = stringMap(account.State["stream_cursors"])
+	if raw, err := json.Marshal(account.State["session_stream_health"]); err == nil {
+		_ = json.Unmarshal(raw, &state.SessionStreamHealth)
+	}
 	state.StreamConnectionState = stringValue(account.State[sdk.RuntimeHealthKeyStreamConnectionState])
 	state.StreamConnectedAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamConnectedAt])
 	state.StreamDisconnectedAt = timeValue(account.State[sdk.RuntimeHealthKeyStreamDisconnectedAt])
@@ -1197,18 +1200,19 @@ func accountAliases(account sdk.ChannelAccount, accountID string) []string {
 func stateToMap(account AccountState) map[string]any {
 	account.EnsureMaps()
 	out := map[string]any{
-		"channel_link_session": account.ChannelLinkSession,
-		"ilink_user_id":        account.ILinkUserID,
-		"ilink_bot_id":         account.ILinkBotID,
-		"status":               account.Status,
-		"last_error":           account.LastError,
-		"get_updates_buf":      account.GetUpdatesBuf,
-		"context_tokens":       account.ContextTokens,
-		"typing_tickets":       account.TypingTickets,
-		"peer_sessions":        account.PeerSessions,
-		"inbound_seen":         account.InboundSeen,
-		"sent_beak_messages":   account.SentBeakMessages,
-		"stream_cursors":       account.StreamCursors,
+		"channel_link_session":  account.ChannelLinkSession,
+		"ilink_user_id":         account.ILinkUserID,
+		"ilink_bot_id":          account.ILinkBotID,
+		"status":                account.Status,
+		"last_error":            account.LastError,
+		"get_updates_buf":       account.GetUpdatesBuf,
+		"context_tokens":        account.ContextTokens,
+		"typing_tickets":        account.TypingTickets,
+		"peer_sessions":         account.PeerSessions,
+		"inbound_seen":          account.InboundSeen,
+		"sent_beak_messages":    account.SentBeakMessages,
+		"stream_cursors":        account.StreamCursors,
+		"session_stream_health": account.SessionStreamHealth,
 		sdk.RuntimeHealthKeyStreamConnectionState:      account.StreamConnectionState,
 		sdk.RuntimeHealthKeyStreamConnectedAt:          account.StreamConnectedAt,
 		sdk.RuntimeHealthKeyStreamDisconnectedAt:       account.StreamDisconnectedAt,
